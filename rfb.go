@@ -253,6 +253,9 @@ func (s *Server) serve(conn net.Conn) {
 	close(done)
 	s.scr.remove(c)
 	inputDo(c.in.releaseAll)
+	if !c.in.stats.empty() {
+		logf("%s: клавіатура за сеанс: %s", addr, c.in.stats.String())
+	}
 	logf("%s: відключено (%v)", addr, err)
 }
 

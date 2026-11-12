@@ -2,7 +2,10 @@
 
 package main
 
-import "unsafe"
+import (
+	"unicode"
+	"unsafe"
+)
 
 // keyDown — що саме було натиснуто для певного keysym (щоб так само відпустити).
 type keyDown struct {
@@ -10,11 +13,15 @@ type keyDown struct {
 	ext      bool
 	uni      [2]uint16 // символ(и) UTF-16 для KEYEVENTF_UNICODE
 	nUni     int
+	phys     bool // «фізична» клавіша: шлемо лише скан-код, символ обирає розкладка Windows
+	tmpShift bool // символ потребує Shift, якого клієнт не тримає
 }
 
 type inputState struct {
-	buttons byte
-	keys    map[uint32]keyDown
+	buttons   byte
+	keys      map[uint32]keyDown
+	clientCyr bool // остання літера від клієнта була нелатинською: мову веде клієнт
+	stats     keyStats
 }
 
 type vkDef struct {
@@ -111,6 +118,9 @@ func foregroundLayout() uintptr {
 
 func (st *inputState) resolve(sym uint32) (k keyDown, ok bool) {
 	if d, found := specialKeys[sym]; found {
+		if name, isMod := modNames[sym]; isMod {
+			st.stats.mod(name)
+		}
 		return keyDown{vk: d.vk, scan: scanOf(d.vk), ext: d.ext}, true
 	}
 	if sym >= 0xFFBE && sym <= 0xFFD5 { // F1..F24
@@ -126,9 +136,32 @@ func (st *inputState) resolve(sym uint32) (k keyDown, ok bool) {
 		return k, false
 	}
 
+	switch {
+	case !unicode.IsLetter(r):
+		st.stats.other++
+	case r < 0x80:
+		st.stats.latin++
+		st.clientCyr = false
+	default:
+		st.stats.cyr++
+		st.clientCyr = true
+	}
+
 	shiftHeld := st.held(0xFFE1, 0xFFE2)
 	modHeld := st.held(0xFFE3, 0xFFE4, 0xFFE9, 0xFFEA, 0xFFE7, 0xFFE8, 0xFFEB, 0xFFEC)
 	hkl := foregroundLayout()
+
+	// У Windows нелатинська розкладка, а клієнт шле латиницю: мову перемкнули на ПК.
+	// Натискаємо фізичну клавішу, і символ обирає Windows (докладніше — у keymap.go).
+	if !modHeld && r < 0x7f && !st.clientCyr {
+		if _, _, latinLayout := vkForRune('a', hkl); !latinLayout {
+			if sk, ok := usScan[r]; ok {
+				st.stats.phys++
+				return keyDown{scan: sk.sc, phys: true, tmpShift: sk.shift && !shiftHeld}, true
+			}
+		}
+	}
+
 	vk, shift, found := vkForRune(r, hkl)
 
 	if modHeld { // комбінації (Ctrl+C тощо) потребують справжньої клавіші
@@ -177,6 +210,17 @@ func emit(k keyDown, down bool) {
 	if k.nUni > 0 {
 		for i := 0; i < k.nUni; i++ {
 			sendKey(&keybdInput{scan: k.uni[i], flags: fl | keyUnicode})
+		}
+		return
+	}
+	if k.phys {
+		shift := k.tmpShift && down
+		if shift {
+			sendKey(&keybdInput{vk: 0xA0, scan: scanOf(0xA0)})
+		}
+		sendKey(&keybdInput{scan: k.scan, flags: fl | keyScancode})
+		if shift {
+			sendKey(&keybdInput{vk: 0xA0, scan: scanOf(0xA0), flags: keyUp})
 		}
 		return
 	}
