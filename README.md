@@ -56,6 +56,8 @@ claude mcp add --env SIMPLEVNC_HOST=адреса:порт --env SIMPLEVNC_PASSWO
 
 Для Cursor — той самий запуск у `~/.cursor/mcp.json` (`command` і `env`).
 
+Покрокова інструкція для Claude Code, Claude Desktop і Cursor: [docs/agent-setup.md](docs/agent-setup.md).
+
 **Окремий пароль для агентів.** Запустіть сервер із `-agentpass інший_пароль` (для служби:
 `-install -p основний -agentpass для_агентів`). Сеанс із цим паролем не може нічого натискати у
 вікнах дозволу Windows та на екрані входу — на такі запити відповідає людина. З `-agentview`
