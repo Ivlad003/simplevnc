@@ -24,11 +24,14 @@ var pageTmpl = template.Must(template.New("page").Parse(pageHTML))
 
 // addrInfo — адреса, за якою сервер видно ззовні.
 type addrInfo struct {
-	IP     string
-	Label  string
-	URL    template.URL // vnc://ip:port; довірений тип, інакше шаблон вирізає схему vnc
-	Host   string       // ip:port
-	WebURL template.URL // веб-клієнт у браузері; порожньо, якщо його не запущено
+	IP       string
+	Label    string
+	URL      template.URL // vnc://ip:port; довірений тип, інакше шаблон вирізає схему vnc
+	Host     string       // ip:port
+	WebURL   template.URL // веб-клієнт у браузері; порожньо, якщо його не запущено
+	WebSharp template.URL // він же з чіткішою картинкою (повільніше)
+	ClipURL  template.URL // сторінка спільного буфера обміну
+	PanelURL template.URL // ця сама сторінка для інших пристроїв (після входу паролем)
 }
 
 // virtualAdapter — мережеві адаптери, недосяжні з інших пристроїв.
@@ -88,21 +91,51 @@ type webUI struct {
 	webPort  int // порт веб-клієнта; 0 — не запущено
 }
 
-// addrs — адреси з посиланнями на веб-клієнт. У звичайному режимі пароль входить
-// у посилання (сторінку бачить лише той, хто за цим ПК), у режимі служби — ні.
-func (u *webUI) addrs() []addrInfo {
+// addrs — адреси з посиланнями на веб-клієнт. На сторінці, відкритій на самому ПК
+// у звичайному режимі, пароль входить у посилання (її бачить лише той, хто за цим
+// ПК). У режимі служби та на мережевій копії сторінки (remote) — ні.
+func (u *webUI) addrs(remote bool) []addrInfo {
 	list := listAddrs(u.port, u.bind)
 	if u.webPort == 0 {
 		return list
 	}
 	pw := u.srv.password
-	if serviceMode {
+	if serviceMode || remote {
 		pw = ""
 	}
 	for i := range list {
-		list[i].WebURL = template.URL("http://" + net.JoinHostPort(list[i].IP, strconv.Itoa(u.webPort)) + webClientPath(pw))
+		base := "http://" + net.JoinHostPort(list[i].IP, strconv.Itoa(u.webPort))
+		list[i].WebURL = template.URL(base + webClientPath(pw, false))
+		list[i].WebSharp = template.URL(base + webClientPath(pw, true))
+		list[i].ClipURL = template.URL(base + "/clip/")
+		list[i].PanelURL = template.URL(base + "/panel/")
 	}
 	return list
+}
+
+// mountRemote додає мережеву копію сторінки підключення: /panel/ на порту
+// веб-клієнта. Вона відкривається з інших пристроїв (наприклад, через Tailscale)
+// лише після входу паролем і сам пароль не показує.
+func (u *webUI) mountRemote(mux *http.ServeMux, hub *clipHub) {
+	mux.HandleFunc("/panel", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/panel/", http.StatusFound)
+	})
+	mux.HandleFunc("/panel/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/panel/" {
+			http.NotFound(w, r)
+			return
+		}
+		if !hub.authorized(r) {
+			http.Redirect(w, r, "/clip/?next=/panel/", http.StatusFound)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		u.render(w, true)
+	})
+	mux.HandleFunc("/panel/qr.png", hub.guard(u.qrHandler(true)))
+	mux.HandleFunc("/panel/api/status", hub.guard(u.status))
+	mux.HandleFunc("/panel/api/scale", hub.guard(u.setScale))
+	mux.HandleFunc("/panel/api/area", hub.guard(u.setArea))
 }
 
 // startWeb піднімає сторінку підключення лише на 127.0.0.1: її бачить той, хто
@@ -121,7 +154,7 @@ func startWeb(srv *Server, port int, bind string, webPort int) (*webUI, error) {
 	u := &webUI{srv: srv, port: port, bind: bind, httpAddr: ln.Addr().String(), webPort: webPort}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", u.guard(u.page))
-	mux.HandleFunc("/qr.png", u.guard(u.qr))
+	mux.HandleFunc("/qr.png", u.guard(u.qrHandler(false)))
 	mux.HandleFunc("/api/status", u.guard(u.status))
 	mux.HandleFunc("/api/scale", u.guard(u.setScale))
 	mux.HandleFunc("/api/area", u.guard(u.setArea))
@@ -159,21 +192,32 @@ func (u *webUI) page(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	u.render(w, false)
+}
+
+// render малює сторінку: remote — мережева копія, без пароля.
+func (u *webUI) render(w http.ResponseWriter, remote bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	pageTmpl.Execute(w, map[string]any{
 		"Name":     u.srv.name,
-		"Addrs":    u.addrs(),
+		"Addrs":    u.addrs(remote),
 		"Password": u.srv.password,
 		"Service":  serviceMode,
+		"Remote":   remote,
 		"Port":     u.port,
 		"Web":      u.webPort != 0,
 		"Steps":    scaleSteps,
 	})
 }
 
-// qr віддає QR-код адреси з номером i: k=web — посилання на веб-клієнт, інакше vnc://.
-func (u *webUI) qr(w http.ResponseWriter, r *http.Request) {
-	addrs := u.addrs()
+// qrHandler віддає QR-код адреси з номером i: k=web — посилання на веб-клієнт,
+// інакше vnc://.
+func (u *webUI) qrHandler(remote bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { u.qr(w, r, remote) }
+}
+
+func (u *webUI) qr(w http.ResponseWriter, r *http.Request, remote bool) {
+	addrs := u.addrs(remote)
 	i, err := strconv.Atoi(r.URL.Query().Get("i"))
 	if err != nil || i < 0 || i >= len(addrs) {
 		http.NotFound(w, r)
@@ -198,12 +242,10 @@ func (u *webUI) qr(w http.ResponseWriter, r *http.Request) {
 
 func (u *webUI) status(w http.ResponseWriter, r *http.Request) {
 	s := u.srv.scr
-	s.mu.RLock()
-	clients := make([]string, 0, len(s.clients))
-	for c := range s.clients {
+	clients := []string{}
+	for _, c := range s.allClients() {
 		clients = append(clients, c.addr)
 	}
-	s.mu.RUnlock()
 	sort.Strings(clients)
 	_, _, aw, ah := captureArea()
 	sc := int(s.scale.Load())

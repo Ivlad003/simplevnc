@@ -51,6 +51,7 @@
   .pass { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
   .pass .value { font-size: 28px; font-weight: 600; letter-spacing: 0.06em; }
   .warn { color: var(--warn); }
+  a.link { color: var(--accent); overflow-wrap: anywhere; }
   .seg { display: flex; flex-wrap: wrap; gap: 8px; }
   .sub { font-size: 14px; color: var(--muted); margin: 18px 0 8px; }
   .sub:first-child { margin-top: 0; }
@@ -77,14 +78,17 @@
       <div class="pair">
         {{if $a.WebURL}}
         <div class="way">
-          <div class="qr"><img src="/qr.png?i={{$i}}&amp;k=web" alt="QR-код веб-клієнта для адреси {{$a.IP}}"></div>
+          <div class="qr"><img src="qr.png?i={{$i}}&amp;k=web" alt="QR-код веб-клієнта для адреси {{$a.IP}}"></div>
           <h3>У браузері</h3>
           <p>iPad, телефон — без застосунку</p>
-          <a class="btn" href="{{$a.WebURL}}" target="_blank" rel="noopener">Відкрити</a>
+          <span>
+            <a class="btn" href="{{$a.WebURL}}" target="_blank" rel="noopener">Відкрити</a>
+            <a class="btn" href="{{$a.WebSharp}}" target="_blank" rel="noopener" title="Більший кадр: чіткіше на екранах з високою щільністю, але повільніше">Чіткіше</a>
+          </span>
         </div>
         {{end}}
         <div class="way">
-          <div class="qr"><img src="/qr.png?i={{$i}}" alt="QR-код адреси {{$a.URL}}"></div>
+          <div class="qr"><img src="qr.png?i={{$i}}" alt="QR-код адреси {{$a.URL}}"></div>
           <h3>VNC-клієнт</h3>
           <p class="addr mono">{{$a.Host}}</p>
           <button type="button" data-copy="{{$a.Host}}">Копіювати адресу</button>
@@ -98,7 +102,9 @@
 
   <h2>Пароль</h2>
   <div class="card pass">
-    {{if .Service}}
+    {{if .Remote}}
+    <span>З міркувань безпеки пароль показується лише на сторінці, відкритій на самому ПК.</span>
+    {{else if .Service}}
     <span>Пароль задано під час встановлення служби й тут не показується.</span>
     {{else if .Password}}
     <span class="value mono">{{.Password}}</span>
@@ -108,6 +114,25 @@
     <span class="warn">Пароль вимкнено — підключитися може будь-хто в мережі.</span>
     {{end}}
   </div>
+
+  {{if .Web}}
+  <h2>Спільний буфер обміну</h2>
+  <div class="card">
+    <p style="margin:0 0 10px">Текст і файли між цим ПК та іншим пристроєм. Відкрийте на тому пристрої:</p>
+    {{range .Addrs}}<p class="mono" style="margin:4px 0"><a class="link" href="{{.ClipURL}}" target="_blank" rel="noopener">{{.ClipURL}}</a></p>
+    {{end}}
+    <p class="hint">Вхід — паролем SimpleVNC. На тій сторінці натисніть Cmd+V, щоб передати скопійоване на ПК; скопійоване на ПК з'явиться там само.</p>
+  </div>
+  {{if not .Remote}}
+  <h2>Ця сторінка з інших пристроїв</h2>
+  <div class="card">
+    <p style="margin:0 0 10px">Адреса <code>127.0.0.1</code> працює лише на самому ПК. З Mac, iPad чи телефона відкривайте:</p>
+    {{range .Addrs}}<p class="mono" style="margin:4px 0"><a class="link" href="{{.PanelURL}}" target="_blank" rel="noopener">{{.PanelURL}}</a></p>
+    {{end}}
+    <p class="hint">Вхід — паролем SimpleVNC. Там ті самі адреси й налаштування, але без показу пароля.</p>
+  </div>
+  {{end}}
+  {{end}}
 
   <h2>Що транслювати</h2>
   <div class="card">
@@ -148,7 +173,7 @@
       </ol>
     </div>
   </div>
-  <p class="hint">Ця сторінка відкривається лише на цьому комп'ютері. {{if .Service}}Сервер працює як служба Windows.{{else}}Щоб зупинити сервер, закрийте вікно SimpleVNC. Вікна дозволу Windows (UAC) та екран входу видно лише в режимі служби: <code>SimpleVNC.exe -install</code>.{{end}}</p>
+  <p class="hint">{{if .Remote}}Ви відкрили цю сторінку з мережі після входу паролем. {{else}}Ця сторінка відкривається лише на цьому комп'ютері. {{end}}{{if .Service}}Сервер працює як служба Windows.{{else}}Щоб зупинити сервер, закрийте вікно SimpleVNC. Вікна дозволу Windows (UAC) та екран входу видно лише в режимі служби: <code>SimpleVNC.exe -install</code>.{{end}}</p>
 </main>
 <script>
   document.querySelectorAll('[data-copy]').forEach(function (b) {
@@ -163,7 +188,7 @@
   var areasKey = '';
   function post(path) { return fetch(path, { method: 'POST' }).then(refresh); }
   function refresh() {
-    fetch('/api/status').then(function (r) { return r.json(); }).then(function (s) {
+    fetch('api/status').then(function (r) { return r.json(); }).then(function (s) {
       var st = document.getElementById('status');
       var ips = s.clients.map(function (c) { return c.replace(/:\d+$/, ''); });
       st.classList.toggle('on', ips.length > 0);
@@ -182,7 +207,7 @@
           b.type = 'button';
           b.dataset.area = a.id;
           b.textContent = a.label;
-          b.addEventListener('click', function () { post('/api/area?v=' + encodeURIComponent(a.id)); });
+          b.addEventListener('click', function () { post('api/area?v=' + encodeURIComponent(a.id)); });
           box.appendChild(b);
         });
       }
@@ -197,7 +222,7 @@
     });
   }
   document.querySelectorAll('[data-scale]').forEach(function (b) {
-    b.addEventListener('click', function () { post('/api/scale?v=' + b.dataset.scale); });
+    b.addEventListener('click', function () { post('api/scale?v=' + b.dataset.scale); });
   });
   refresh();
   setInterval(refresh, 2000);

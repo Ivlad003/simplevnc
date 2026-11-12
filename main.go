@@ -60,6 +60,7 @@ func main() {
 	flag.BoolVar(&forceDrawnCurs, "drawcursor", false, "завжди малювати курсор у кадрі (видно рухи миші за самим ПК)")
 	agentPass := flag.String("agentpass", "", "окремий пароль для ШІ-агентів (до 8 символів): без доступу до вікон дозволу Windows")
 	agentView := flag.Bool("agentview", false, "агенти з паролем -agentpass лише дивляться, без миші та клавіатури")
+	flag.StringVar(&clipDirOverride, "clipdir", "", "куди зберігати файли, надіслані через спільний буфер обміну (типово — Завантаження/SimpleVNC)")
 	noBonjour := flag.Bool("nobonjour", false, "не оголошувати ПК у локальній мережі (Finder на Mac)")
 	install := flag.Bool("install", false, "встановити як службу Windows: автозапуск, вікна UAC та екран входу")
 	uninstall := flag.Bool("uninstall", false, "видалити службу Windows")
@@ -70,8 +71,9 @@ func main() {
 
 	pSetConsoleOutputCP.Call(65001)
 
-	explicitPort := false
-	flag.Visit(func(f *flag.Flag) { explicitPort = explicitPort || f.Name == "port" })
+	given := map[string]bool{} // параметри, задані явно
+	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	explicitPort := given["port"]
 
 	password := *pass
 	if len(password) > 8 {
@@ -96,7 +98,7 @@ func main() {
 		if explicitPort {
 			c.Port = *port
 		}
-		os.Exit(serviceCommand(*install, c, *nopass, *elevated))
+		os.Exit(serviceCommand(*install, c, *nopass, *elevated, given))
 	}
 
 	o := options{port: *port, portAuto: !explicitPort, bind: *bind, password: password,
@@ -168,11 +170,12 @@ func runServer(o options) {
 		go advertiseBonjour(host, o.port)
 	}
 
+	_, _, areaW, areaH := captureArea()
 	if serviceMode {
-		logf("робочий процес служби: порт %d, кадр %dx%d", o.port, scr.w, scr.h)
+		logf("робочий процес служби: порт %d, кадр %dx%d", o.port, areaW, areaH)
 	} else {
 		fmt.Println("SimpleVNC запущено")
-		fmt.Printf("  Екран:   %dx%d", scr.w, scr.h)
+		fmt.Printf("  Екран:   %dx%d", areaW, areaH)
 		if sc := int(scr.scale.Load()); sc != 100 {
 			fmt.Printf(" (трансляція %d%%)", sc)
 		}
@@ -193,7 +196,7 @@ func runServer(o options) {
 			fmt.Printf("  Пароль для агентів: %s (%s)\n", srv.agentPassword, mode)
 		}
 	}
-	webPort, err := startWebClient(srv, o.bind)
+	webPort, webMux, hub, err := startWebClient(srv, o.bind)
 	if err != nil {
 		logf("веб-клієнт не вдалося запустити: %v", err)
 	} else if !serviceMode {
@@ -201,10 +204,17 @@ func runServer(o options) {
 	} else {
 		logf("веб-клієнт: порт %d", webPort)
 	}
-	if web, err := startWeb(srv, o.port, o.bind, webPort); err != nil {
+	web, err := startWeb(srv, o.port, o.bind, webPort)
+	if err == nil && webMux != nil {
+		web.mountRemote(webMux, hub) // та сама сторінка для інших пристроїв, за паролем
+	}
+	if err != nil {
 		logf("сторінку підключення не вдалося запустити: %v", err)
 	} else if !serviceMode {
 		fmt.Printf("  Сторінка з QR-кодами: %s\n", web.url())
+		if webMux != nil {
+			fmt.Printf("  Вона ж з інших пристроїв: http://адреса:%d/panel/ (вхід паролем)\n", webPort)
+		}
 		if !o.noOpen {
 			web.openBrowser()
 		}

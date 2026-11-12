@@ -199,12 +199,7 @@ func (s *Screen) watchClipboard() {
 		if uint32(seq) == ownClipSeq.Load() {
 			continue
 		}
-		s.mu.RLock()
-		cl := make([]*Client, 0, len(s.clients))
-		for c := range s.clients {
-			cl = append(cl, c)
-		}
-		s.mu.RUnlock()
+		cl := s.allClients()
 		if len(cl) == 0 {
 			continue
 		}
@@ -234,8 +229,10 @@ func (s *Screen) watchClipboard() {
 			case ext: // текст піде лише тоді, коли клієнт його попросить
 				go c.write(extClipMsg(clipNotify|clipText, nil))
 			case apple:
+				logf("%s: буфер обміну VNC: клієнту macOS %d байт (UTF-8)", c.addr, len(txt))
 				go c.write(utf)
 			default:
+				logf("%s: буфер обміну VNC: клієнту %d байт (Latin-1)", c.addr, len(latin)-8)
 				go c.write(latin)
 			}
 		}

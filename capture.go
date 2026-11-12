@@ -97,20 +97,38 @@ func (c *gdiCap) drawCursor() {
 	pDrawIconEx.Call(c.memDC, uintptr(x), uintptr(y), ci.hCursor, 0, 0, 0, 0, diNormal)
 }
 
-// Screen — спільний кадр і список клієнтів.
-type Screen struct {
-	mu      sync.RWMutex
+// view — кадр одного масштабу та клієнти, які його отримують. Різним клієнтам
+// потрібен різний розмір: рідному VNC-клієнту — повний, браузеру на телефоні — у
+// кілька разів менший. Захоплення одне на всіх, зменшення — окреме для кожного view.
+type view struct {
+	scale   int
 	w, h    int
 	tw, th  int
-	vx, vy  int
-	fb      []byte // BGRX, актуальний кадр
+	fb      []byte // BGRX, актуальний кадр цього масштабу
 	clients map[*Client]struct{}
 
-	cur       *cursorShape // форма курсора для клієнтів, що малюють його самі
+	// належить потокові захоплення
+	scaled  []byte
+	from    [2]int
+	xmap    []int32
+	changed []bool
+}
+
+func (v *view) resize(w, h int) {
+	v.w, v.h = w, h
+	v.tw, v.th = (w+tile-1)/tile, (h+tile-1)/tile
+	v.fb = make([]byte, w*h*4)
+}
+
+// Screen — джерело кадрів і всі його view.
+type Screen struct {
+	mu    sync.RWMutex
+	views map[int]*view // за масштабом у відсотках
+
+	cur       *cursorShape // форма курсора в повному розмірі; під view її зменшують при відправці
 	curSerial uint32
 
-	scale    atomic.Int32 // відсоток розміру кадру (100 — без зменшення)
-	fbW, fbH atomic.Int32 // поточний розмір кадру для клієнтів
+	scale atomic.Int32 // масштаб для клієнтів, які не просили свого (звичайні VNC-клієнти)
 
 	wake      chan struct{}
 	stale     atomic.Bool  // є клієнт, що ще не бачив свіжого захоплення
@@ -118,20 +136,10 @@ type Screen struct {
 }
 
 func newScreen() *Screen {
-	s := &Screen{clients: map[*Client]struct{}{}, wake: make(chan struct{}, 1)}
+	s := &Screen{views: map[int]*view{}, wake: make(chan struct{}, 1)}
 	s.scale.Store(100)
 	cursorInFrame.Store(true)
-	s.vx, s.vy, s.w, s.h = captureArea()
-	s.resize(s.w, s.h)
 	return s
-}
-
-func (s *Screen) resize(w, h int) {
-	s.w, s.h = w, h
-	s.fbW.Store(int32(w))
-	s.fbH.Store(int32(h))
-	s.tw, s.th = (w+tile-1)/tile, (h+tile-1)/tile
-	s.fb = make([]byte, w*h*4)
 }
 
 func (s *Screen) poke() {
@@ -141,30 +149,103 @@ func (s *Screen) poke() {
 	}
 }
 
-func (s *Screen) add(c *Client) {
-	s.mu.Lock()
+// scaledSize — розмір кадру w x h у масштабі scale відсотків.
+func scaledSize(w, h, scale int) (int, int) {
+	if scale > 0 && scale < 100 {
+		return max(w*scale/100, 64), max(h*scale/100, 64)
+	}
+	return w, h
+}
+
+// frameSizeFor — розмір кадру для клієнта з масштабом scale (0 — типовий).
+func (s *Screen) frameSizeFor(scale int) (int, int) {
+	if scale == 0 {
+		scale = int(s.scale.Load())
+	}
+	_, _, w, h := captureArea()
+	return scaledSize(w, h, scale)
+}
+
+func (s *Screen) frameSize() (int, int) { return s.frameSizeFor(0) }
+
+// viewLocked повертає view потрібного масштабу, створюючи його за потреби.
+// mu має бути взятий на запис.
+func (s *Screen) viewLocked(scale int) *view {
+	if v := s.views[scale]; v != nil {
+		return v
+	}
+	_, _, aw, ah := captureArea()
+	v := &view{scale: scale, clients: map[*Client]struct{}{}}
+	v.resize(scaledSize(aw, ah, scale))
+	s.views[scale] = v
+	return v
+}
+
+// attachLocked ставить клієнта у view (mu взятий на запис). Клієнт отримає повний
+// кадр; resized — чи треба повідомити йому новий розмір.
+func (s *Screen) attachLocked(c *Client, v *view, resized bool) {
+	if old := c.v; old != nil && old != v {
+		delete(old.clients, c)
+		if len(old.clients) == 0 && s.views[old.scale] == old {
+			delete(s.views, old.scale)
+		}
+	}
+	c.v = v
+	v.clients[c] = struct{}{}
 	c.mu.Lock()
-	c.tw, c.th = s.tw, s.th
-	c.dirty = make([]bool, s.tw*s.th)
+	c.tw, c.th = v.tw, v.th
+	c.dirty = make([]bool, v.tw*v.th)
+	for i := range c.dirty {
+		c.dirty[i] = true
+	}
+	c.spare = nil
+	c.anyDirty, c.fresh = true, false
+	c.resized = c.resized || resized
+	c.curSerial = 0 // курсор під новий масштаб треба надіслати знову
 	c.mu.Unlock()
-	s.clients[c] = struct{}{}
-	s.stale.Store(true)
+}
+
+// add підключає клієнта; scale — масштаб, який він просив, або 0 для типового.
+func (s *Screen) add(c *Client, scale int) {
+	c.scaleReq = scale
+	if scale == 0 {
+		scale = int(s.scale.Load())
+	}
+	s.mu.Lock()
+	s.attachLocked(c, s.viewLocked(scale), false)
 	s.mu.Unlock()
+	s.stale.Store(true)
 	s.refreshCursorMode()
 	s.poke()
 }
 
 func (s *Screen) remove(c *Client) {
 	s.mu.Lock()
-	delete(s.clients, c)
+	if v := c.v; v != nil {
+		delete(v.clients, c)
+		if len(v.clients) == 0 && s.views[v.scale] == v {
+			delete(s.views, v.scale)
+		}
+	}
 	s.mu.Unlock()
 	s.refreshCursorMode()
 }
 
-func (s *Screen) anyWaiting() bool {
+// allClients — усі підключені клієнти.
+func (s *Screen) allClients() []*Client {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for c := range s.clients {
+	var out []*Client
+	for _, v := range s.views {
+		for c := range v.clients {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (s *Screen) anyWaiting() bool {
+	for _, c := range s.allClients() {
 		c.mu.Lock()
 		w := c.want
 		c.mu.Unlock()
@@ -210,10 +291,6 @@ func openCapturer() capturer {
 func (s *Screen) run() {
 	runtime.LockOSThread()
 	var cap capturer
-	var changed []bool
-	var scaled []byte
-	var scaledFrom [2]int
-	var xmap []int32
 	var curTrack cursorTrack
 	var desk deskFollower
 	var kind string
@@ -234,10 +311,7 @@ func (s *Screen) run() {
 			select {
 			case <-s.wake:
 			case <-time.After(2 * time.Second):
-				s.mu.RLock()
-				n := len(s.clients)
-				s.mu.RUnlock()
-				if n == 0 { // нікого немає — звільняємо ресурси
+				if len(s.allClients()) == 0 { // нікого немає — звільняємо ресурси
 					drop()
 				}
 			}
@@ -288,66 +362,65 @@ func (s *Screen) run() {
 			continue
 		}
 		s.pollCursor(&curTrack)
-		if !got && (!s.stale.Load() || !cap.valid()) {
+		force := s.stale.Swap(false) // хтось чекає на перший кадр: публікуємо навіть без змін
+		if !got && (!force || !cap.valid()) {
+			if force {
+				s.stale.Store(true) // кадру ще немає — повторимо наступного разу
+			}
 			continue // екран не змінювався; grab уже зачекав
 		}
 		bits := cap.frame()
-		cvx, cvy, cw, ch := cap.geom()
+		_, _, cw, ch := cap.geom()
 
-		// масштаб: зменшуємо кадр до порівняння, тож клієнт отримує менше даних
-		if sc := int(s.scale.Load()); sc > 0 && sc < 100 {
-			dw, dh := max(cw*sc/100, 64), max(ch*sc/100, 64) // та сама формула, що у frameSize
-			if len(scaled) != dw*dh*4 || scaledFrom != [2]int{cw, ch} {
-				scaled = make([]byte, dw*dh*4)
-				scaledFrom = [2]int{cw, ch}
-				xmap = make([]int32, dw)
-				for x := range xmap {
-					xmap[x] = int32(min(x*cw/dw, cw-2))
-				}
+		s.mu.RLock()
+		views := make([]*view, 0, len(s.views))
+		for _, v := range s.views {
+			if len(v.clients) > 0 {
+				views = append(views, v)
 			}
-			downscale(scaled, dw, dh, bits, cw, ch, xmap)
-			bits, cw, ch = scaled, dw, dh
 		}
+		s.mu.RUnlock()
 
-		if cw != s.w || ch != s.h {
-			s.mu.Lock()
-			s.resize(cw, ch)
-			s.vx, s.vy = cvx, cvy
-			copy(s.fb, bits)
-			for c := range s.clients {
-				c.mu.Lock()
-				c.tw, c.th = s.tw, s.th
-				c.dirty = make([]bool, s.tw*s.th)
-				for i := range c.dirty {
-					c.dirty[i] = true
+		any := false
+		for _, v := range views {
+			nb, vw, vh := bits, cw, ch
+			if v.scale < 100 { // зменшуємо кадр до порівняння: клієнт отримує менше даних
+				vw, vh = scaledSize(cw, ch, v.scale)
+				if len(v.scaled) != vw*vh*4 || v.from != [2]int{cw, ch} {
+					v.scaled = make([]byte, vw*vh*4)
+					v.from = [2]int{cw, ch}
+					v.xmap = make([]int32, vw)
+					for x := range v.xmap {
+						v.xmap[x] = int32(min(x*cw/vw, cw-2))
+					}
 				}
-				c.anyDirty, c.resized, c.fresh = true, true, true
-				c.mu.Unlock()
-				c.notify()
+				downscale(v.scaled, vw, vh, bits, cw, ch, v.xmap)
+				nb = v.scaled
 			}
-			s.mu.Unlock()
-			idleSince = time.Now()
-			continue
+			if vw != v.w || vh != v.h {
+				s.resizeView(v, vw, vh, nb)
+				any = true
+				continue
+			}
+			if len(v.changed) != v.tw*v.th {
+				v.changed = make([]bool, v.tw*v.th)
+			}
+			changed := v.diff(nb)
+			if changed || force {
+				s.publish(v, nb, changed)
+			}
+			any = any || changed
 		}
-		s.vx, s.vy = cvx, cvy
-
-		if len(changed) != s.tw*s.th {
-			changed = make([]bool, s.tw*s.th)
-		}
-		any := s.diff(bits, changed)
 		if verbose {
 			statFrames++
 			statGrab += tGrab
 			statDiff += time.Since(start) - tGrab
 			if time.Since(statAt) > 3*time.Second {
-				logf("%s: %d кадрів, захоплення %v, порівняння %v на кадр", kind, statFrames,
+				logf("%s: %d кадрів, захоплення %v, обробка %v на кадр (розмірів кадру: %d)", kind, statFrames,
 					(statGrab / time.Duration(statFrames)).Round(100*time.Microsecond),
-					(statDiff / time.Duration(statFrames)).Round(100*time.Microsecond))
+					(statDiff / time.Duration(statFrames)).Round(100*time.Microsecond), len(views))
 				statFrames, statGrab, statDiff, statAt = 0, 0, 0, time.Now()
 			}
-		}
-		if any || s.stale.Load() {
-			s.publish(bits, changed, any)
 		}
 		if any {
 			idleSince = time.Now()
@@ -382,29 +455,50 @@ func (s *Screen) run() {
 	}
 }
 
-// frameSize — розмір кадру, який бачать клієнти за поточного масштабу.
-func (s *Screen) frameSize() (int, int) {
-	_, _, w, h := captureArea()
-	if sc := int(s.scale.Load()); sc > 0 && sc < 100 {
-		w, h = max(w*sc/100, 64), max(h*sc/100, 64)
-	}
-	return w, h
-}
-
 // scaleSteps — дозволені масштаби у відсотках.
 var scaleSteps = []int{100, 75, 66, 50, 33, 25}
 
-// setScale змінює масштаб на льоту; клієнти отримують новий розмір екрана.
-func (s *Screen) setScale(p int) bool {
+func validScale(p int) bool {
 	for _, v := range scaleSteps {
 		if v == p {
-			s.scale.Store(int32(p))
-			s.stale.Store(true) // змусити цикл захоплення перевипустити кадр
-			s.poke()
 			return true
 		}
 	}
 	return false
+}
+
+// setScale змінює типовий масштаб на льоту. Клієнти, які не просили власного
+// масштабу, переходять на новий розмір; решта лишаються при своєму.
+func (s *Screen) setScale(p int) bool {
+	if !validScale(p) {
+		return false
+	}
+	s.scale.Store(int32(p))
+	s.mu.Lock()
+	var move []*Client
+	for _, v := range s.views {
+		if v.scale == p {
+			continue
+		}
+		for c := range v.clients {
+			if c.scaleReq == 0 {
+				move = append(move, c)
+			}
+		}
+	}
+	if len(move) > 0 {
+		target := s.viewLocked(p)
+		for _, c := range move {
+			s.attachLocked(c, target, true)
+		}
+	}
+	s.mu.Unlock()
+	for _, c := range move {
+		c.notify()
+	}
+	s.stale.Store(true) // змусити цикл захоплення перевипустити кадр
+	s.poke()
+	return true
 }
 
 // downscale зменшує кадр: кожен піксель — середнє блоку 2x2 у вихідній точці.
@@ -427,27 +521,48 @@ func downscale(dst []byte, dw, dh int, src []byte, sw, sh int, xmap []int32) {
 	}
 }
 
-// diff порівнює новий кадр із поточним поклітинно. Читає s.fb без блокування:
-// пише в нього лише цей самий потік.
-func (s *Screen) diff(nb []byte, changed []bool) bool {
+// resizeView задає view новий розмір (змінилася область чи роздільність екрана) і
+// повідомляє про це його клієнтів.
+func (s *Screen) resizeView(v *view, w, h int, nb []byte) {
+	s.mu.Lock()
+	v.resize(w, h)
+	copy(v.fb, nb)
+	for c := range v.clients {
+		c.mu.Lock()
+		c.tw, c.th = v.tw, v.th
+		c.dirty = make([]bool, v.tw*v.th)
+		for i := range c.dirty {
+			c.dirty[i] = true
+		}
+		c.spare = nil
+		c.anyDirty, c.resized, c.fresh = true, true, true
+		c.mu.Unlock()
+		c.notify()
+	}
+	s.mu.Unlock()
+}
+
+// diff порівнює новий кадр із поточним поклітинно й заповнює v.changed. Читає v.fb
+// без блокування: пише в нього лише цей самий потік.
+func (v *view) diff(nb []byte) bool {
 	any := false
-	stride := s.w * 4
-	for ty := 0; ty < s.th; ty++ {
+	stride := v.w * 4
+	for ty := 0; ty < v.th; ty++ {
 		y0 := ty * tile
 		y1 := y0 + tile
-		if y1 > s.h {
-			y1 = s.h
+		if y1 > v.h {
+			y1 = v.h
 		}
-		row := changed[ty*s.tw : (ty+1)*s.tw]
+		row := v.changed[ty*v.tw : (ty+1)*v.tw]
 		for i := range row {
 			row[i] = false
 		}
 		for y := y0; y < y1; y++ {
 			off := y * stride
-			if bytes.Equal(nb[off:off+stride], s.fb[off:off+stride]) {
+			if bytes.Equal(nb[off:off+stride], v.fb[off:off+stride]) {
 				continue
 			}
-			for tx := 0; tx < s.tw; tx++ {
+			for tx := 0; tx < v.tw; tx++ {
 				if row[tx] {
 					continue
 				}
@@ -456,7 +571,7 @@ func (s *Screen) diff(nb []byte, changed []bool) bool {
 				if b > off+stride {
 					b = off + stride
 				}
-				if !bytes.Equal(nb[a:b], s.fb[a:b]) {
+				if !bytes.Equal(nb[a:b], v.fb[a:b]) {
 					row[tx] = true
 					any = true
 				}
@@ -466,26 +581,25 @@ func (s *Screen) diff(nb []byte, changed []bool) bool {
 	return any
 }
 
-// publish переносить змінені клітинки в s.fb і позначає їх усім клієнтам.
-// Також позначає клієнтів «свіжими»: новий клієнт не отримує кадр, доки після
-// його підключення не відбулося хоча б одне захоплення.
-func (s *Screen) publish(nb []byte, changed []bool, any bool) {
-	stride := s.w * 4
+// publish переносить змінені клітинки у v.fb і позначає їх клієнтам цього view.
+// Також позначає клієнтів «свіжими»: новий клієнт не отримує кадр, доки після його
+// підключення не відбулося хоча б одне захоплення.
+func (s *Screen) publish(v *view, nb []byte, any bool) {
+	stride := v.w * 4
 	s.mu.Lock()
-	s.stale.Store(false)
-	for ty := 0; any && ty < s.th; ty++ {
+	for ty := 0; any && ty < v.th; ty++ {
 		y0 := ty * tile
 		y1 := y0 + tile
-		if y1 > s.h {
-			y1 = s.h
+		if y1 > v.h {
+			y1 = v.h
 		}
-		for tx := 0; tx < s.tw; {
-			if !changed[ty*s.tw+tx] {
+		for tx := 0; tx < v.tw; {
+			if !v.changed[ty*v.tw+tx] {
 				tx++
 				continue
 			}
 			x0 := tx
-			for tx < s.tw && changed[ty*s.tw+tx] {
+			for tx < v.tw && v.changed[ty*v.tw+tx] {
 				tx++
 			}
 			a := x0 * tile * 4
@@ -494,14 +608,14 @@ func (s *Screen) publish(nb []byte, changed []bool, any bool) {
 				b = stride
 			}
 			for y := y0; y < y1; y++ {
-				copy(s.fb[y*stride+a:y*stride+b], nb[y*stride+a:y*stride+b])
+				copy(v.fb[y*stride+a:y*stride+b], nb[y*stride+a:y*stride+b])
 			}
 		}
 	}
-	for c := range s.clients {
+	for c := range v.clients {
 		c.mu.Lock()
-		if any && len(c.dirty) == len(changed) {
-			for i, ch := range changed {
+		if any && len(c.dirty) == len(v.changed) {
+			for i, ch := range v.changed {
 				if ch {
 					c.dirty[i] = true
 				}

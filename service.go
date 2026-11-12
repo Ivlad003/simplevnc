@@ -231,7 +231,8 @@ func uninstallService() error {
 }
 
 // serviceCommand виконує -install або -uninstall; повертає код завершення.
-func serviceCommand(install bool, c svcConfig, noPass, viaUAC bool) int {
+// given — параметри, задані явно: під час оновлення решта лишається як була.
+func serviceCommand(install bool, c svcConfig, noPass, viaUAC bool, given map[string]bool) int {
 	if !isElevated() {
 		fmt.Println("Потрібні права адміністратора — Windows зараз попросить підтвердження.")
 		if err := relaunchElevated(); err != nil {
@@ -254,10 +255,32 @@ func serviceCommand(install bool, c svcConfig, noPass, viaUAC bool) int {
 		fmt.Println("Службу SimpleVNC видалено.")
 		return 0
 	}
+	keepPort, updating := false, false
+	if old, err := loadConfig(); err == nil { // оновлення: чого не задано, те лишається як було
+		updating = true
+		if !given["p"] && !noPass {
+			c.Password = old.Password
+		}
+		if !given["agentpass"] {
+			c.AgentPassword = old.AgentPassword
+		}
+		if !given["agentview"] {
+			c.AgentView = old.AgentView
+		}
+		if !given["scale"] && old.Scale != 0 {
+			c.Scale = old.Scale
+		}
+		if !given["area"] && old.Area != "" {
+			c.Area = old.Area
+		}
+		if !given["port"] && old.Port != 0 {
+			c.Port, keepPort = old.Port, true // порт зараз зайнятий самою службою — це нормально
+		}
+	}
 	if c.Password == "" && !noPass {
 		c.Password = randomPassword()
 	}
-	if c.Port == 0 || !portFree(c.Port) { // порт фіксуємо зараз, щоб він не змінювався між запусками
+	if !keepPort && (c.Port == 0 || !portFree(c.Port)) { // порт фіксуємо зараз, щоб він не змінювався між запусками
 		for p := 5900; p < 6000; p++ {
 			if portFree(p) {
 				c.Port = p
@@ -269,6 +292,9 @@ func serviceCommand(install bool, c svcConfig, noPass, viaUAC bool) int {
 	if err != nil {
 		fmt.Println("Не вдалося встановити службу:", err)
 		return 1
+	}
+	if updating {
+		fmt.Println("Службу SimpleVNC оновлено. Налаштування, яких ви не задавали, лишилися як були.")
 	}
 	fmt.Println("Службу SimpleVNC встановлено й запущено. Вона стартує разом із Windows,")
 	fmt.Println("показує вікна дозволу (UAC) та екран входу.")

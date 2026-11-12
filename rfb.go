@@ -16,6 +16,7 @@ import (
 	"net"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type Server struct {
@@ -48,6 +49,8 @@ type Client struct {
 	encPref   int32 // кодування, яке клієнт назвав першим серед підтримуваних
 	canSize   bool
 	addr      string
+	v         *view  // кадр, який отримує клієнт (захищено scr.mu)
+	scaleReq  int    // масштаб, який клієнт просив сам; 0 — типовий
 	agent     bool   // сеанс агента (увійшов із паролем для агентів)
 	noInput   bool   // ввід від цього клієнта ігнорується
 	extClip   bool   // клієнт уміє розширений буфер обміну в UTF-8 (захищено mu)
@@ -135,8 +138,8 @@ type hsInfo struct {
 	agent bool // увійшов із паролем для агентів
 }
 
-func (s *Server) handshake(conn net.Conn) (w, h int, info hsInfo, err error) {
-	w, h = s.scr.frameSize()
+func (s *Server) handshake(conn net.Conn, scale int) (w, h int, info hsInfo, err error) {
+	w, h = s.scr.frameSizeFor(scale)
 	err = s.handshakeSize(conn, w, h, &info)
 	return w, h, info, err
 }
@@ -244,11 +247,15 @@ func (s *Server) handshakeSize(conn net.Conn, w, h int, info *hsInfo) error {
 	return err
 }
 
-func (s *Server) serve(conn net.Conn) {
+func (s *Server) serve(conn net.Conn) { s.serveScaled(conn, 0) }
+
+// serveScaled обслуговує клієнта; scale — розмір кадру у відсотках, який він
+// просив (так робить веб-клієнт), або 0 для типового.
+func (s *Server) serveScaled(conn net.Conn, scale int) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
 	logf("%s: нове з'єднання, чекаю на вхід", addr)
-	w, h, info, err := s.handshake(conn)
+	w, h, info, err := s.handshake(conn, scale)
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
@@ -269,7 +276,7 @@ func (s *Server) serve(conn net.Conn) {
 	default:
 		logf("%s: підключено", addr)
 	}
-	s.scr.add(c)
+	s.scr.add(c, scale)
 	done := make(chan struct{})
 	go c.sender(done)
 
@@ -317,7 +324,7 @@ func (c *Client) reader() error {
 			}
 			n := int(binary.BigEndian.Uint16(b[1:3]))
 			// Як у libvncserver: беремо перше з наших кодувань у порядку клієнта.
-			pref, size, cursor, ext, exact := int32(-1), false, false, false, false
+			pref, size, cursor, ext, exact, appleEnc := int32(-1), false, false, false, false, false
 			list := make([]int32, 0, n)
 			for i := 0; i < n; i++ {
 				if _, err := io.ReadFull(br, b[:4]); err != nil {
@@ -338,6 +345,8 @@ func (c *Client) reader() error {
 					ext = true
 				case encExactKeys:
 					exact = true
+				case 1011, 1100, 1101, 1104, 1105: // такі кодування називає лише клієнт macOS
+					appleEnc = true
 				}
 			}
 			if pref < 0 {
@@ -349,6 +358,7 @@ func (c *Client) reader() error {
 			c.encMu.Unlock()
 			c.mu.Lock()
 			c.canCursor, c.curSerial = cursor, 0
+			c.apple = c.apple || appleEnc
 			newExt := ext && !c.extClip
 			c.extClip = ext
 			c.mu.Unlock()
@@ -392,7 +402,10 @@ func (c *Client) reader() error {
 				return err
 			}
 			px, py, mask := int(binary.BigEndian.Uint16(b[1:3])), int(binary.BigEndian.Uint16(b[3:5])), b[0]
-			c.input(func() { c.in.pointer(px, py, mask, int(c.scr.fbW.Load()), int(c.scr.fbH.Load())) })
+			c.scr.mu.RLock()
+			fw, fh := c.v.w, c.v.h // координати клієнта — у його власному кадрі
+			c.scr.mu.RUnlock()
+			c.input(func() { c.in.pointer(px, py, mask, fw, fh) })
 			c.touch()
 		case 6: // ClientCutText
 			if _, err := io.ReadFull(br, b[:7]); err != nil {
@@ -413,6 +426,7 @@ func (c *Client) reader() error {
 			if extended {
 				c.handleExtClip(txt)
 			} else {
+				logf("%s: буфер обміну VNC: від клієнта %d байт, UTF-8: %v", c.addr, len(txt), utf8.Valid(txt))
 				setClipboard(txt)
 			}
 		default:
@@ -483,6 +497,7 @@ func (c *Client) sender(done chan struct{}) {
 func (c *Client) sendUpdate() error {
 	s := c.scr
 	s.mu.RLock()
+	v := c.v
 	c.mu.Lock()
 	// курсор на боці клієнта: справжня форма або прозорий, якщо курсор уже в кадрі
 	var curWant uint32
@@ -491,24 +506,24 @@ func (c *Client) sendUpdate() error {
 		if cursorInFrame.Load() {
 			curWant = 1
 		} else if s.cur != nil {
-			curWant, curShape = s.curSerial, s.cur
+			curWant, curShape = s.curSerial, s.cur.scaled(v.scale)
 		}
 	}
 	curPending := curWant != 0 && curWant != c.curSerial
-	if !c.want || !c.fresh || (!c.anyDirty && !curPending) || len(c.dirty) != s.tw*s.th {
+	if !c.want || !c.fresh || (!c.anyDirty && !curPending) || len(c.dirty) != v.tw*v.th {
 		c.mu.Unlock()
 		s.mu.RUnlock()
 		return nil
 	}
-	if c.resized && c.knownW == s.w && c.knownH == s.h {
+	if c.resized && c.knownW == v.w && c.knownH == v.h {
 		c.resized = false // клієнт уже має цей розмір із ServerInit
 	}
 	c.want = false
 	if c.resized {
 		c.resized = false
-		c.knownW, c.knownH = s.w, s.h
+		c.knownW, c.knownH = v.w, v.h
 		c.mu.Unlock()
-		w, h := s.w, s.h
+		w, h := v.w, v.h
 		s.mu.RUnlock()
 		c.encMu.Lock()
 		ok := c.canSize
@@ -540,13 +555,13 @@ func (c *Client) sendUpdate() error {
 
 	c.rs = c.rs[:0]
 	if dirty != nil {
-		c.rs = mergeRects(dirty, s.tw, s.th, s.w, s.h, c.rs)
+		c.rs = mergeRects(dirty, v.tw, v.th, v.w, v.h, c.rs)
 	}
 	nRects := len(c.rs)
 	if curPending {
 		nRects++
 	}
-	stride := s.w * 4
+	stride := v.w * 4
 	c.out.Reset()
 	c.out.Write([]byte{0, 0, byte(nRects >> 8), byte(nRects)})
 	c.encMu.Lock()
@@ -564,11 +579,11 @@ func (c *Client) sendUpdate() error {
 		c.out.Write(hdr[:])
 		switch c.encPref {
 		case encZRLE:
-			c.enc.zrleRect(&c.out, s.fb, stride, r)
+			c.enc.zrleRect(&c.out, v.fb, stride, r)
 		case encZlib:
-			c.enc.zlibRect(&c.out, s.fb, stride, r)
+			c.enc.zlibRect(&c.out, v.fb, stride, r)
 		default:
-			c.enc.rawRect(&c.out, s.fb, stride, r)
+			c.enc.rawRect(&c.out, v.fb, stride, r)
 		}
 	}
 	pref := c.encPref

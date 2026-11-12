@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Спільний буфер обміну</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #16181d; --muted: #5f6672;
+    --line: #dfe2e8; --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --warn: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #181b21; --text: #e8eaee; --muted: #9aa1ad;
+      --line: #2a2f38; --accent: #4c8dff; --accent-text: #0b0d11; --ok: #4ac26b; --warn: #ff7b72;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 16px 56px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin-bottom: 20px; }
+  h1 { font-size: 26px; margin: 0; letter-spacing: -0.01em; }
+  .host { color: var(--muted); font-size: 17px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 28px 0 10px; font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .drop { border: 2px dashed var(--line); border-radius: 12px; padding: 26px 16px; text-align: center; color: var(--muted); }
+  .drop.over { border-color: var(--accent); color: var(--text); }
+  .drop strong { color: var(--text); display: block; font-size: 17px; margin-bottom: 4px; }
+  textarea, input[type=password] {
+    width: 100%; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  }
+  textarea { min-height: 84px; resize: vertical; margin-top: 14px; }
+  textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+  button, .btn {
+    font: inherit; font-size: 15px; padding: 8px 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--text); text-decoration: none;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button:hover, .btn:hover { border-color: var(--accent); }
+  button:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .status { color: var(--muted); font-size: 14px; min-height: 21px; margin: 10px 0 0; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--warn); }
+  pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto;
+        font: 14px/1.45 "Cascadia Mono", Consolas, ui-monospace, monospace; }
+  .empty { color: var(--muted); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .fname { overflow-wrap: anywhere; min-width: 0; }
+  .fsize { color: var(--muted); font-size: 14px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Спільний буфер обміну</h1>
+    <span class="host" id="host"></span>
+  </header>
+
+  <section id="login" class="card" hidden>
+    <form id="loginForm">
+      <label for="pw">Пароль SimpleVNC</label>
+      <div class="row">
+        <input type="password" id="pw" autocomplete="current-password" style="flex:1; min-width:180px">
+        <button type="submit" class="primary">Увійти</button>
+      </div>
+      <p class="status err" id="loginErr"></p>
+    </form>
+  </section>
+
+  <section id="app" hidden>
+    <h2>З цього пристрою на ПК</h2>
+    <div class="card">
+      <div class="drop" id="drop">
+        <strong>Натисніть Cmd+V або Ctrl+V</strong>
+        Скопійований текст чи файли потраплять у буфер обміну ПК.<br>Файли можна також перетягнути сюди.
+        <div class="row" style="justify-content:center">
+          <button type="button" id="pick">Вибрати файли</button>
+          <input type="file" id="files" multiple hidden>
+        </div>
+      </div>
+      <textarea id="text" placeholder="Або введіть текст тут"></textarea>
+      <div class="row">
+        <button type="button" class="primary" id="send">Надіслати текст на ПК</button>
+      </div>
+      <p class="status" id="status" role="status"></p>
+    </div>
+
+    <h2>З ПК на цей пристрій</h2>
+    <div class="card">
+      <div id="pcTextBox">
+        <pre id="pcText" class="empty">У буфері обміну ПК немає тексту.</pre>
+        <div class="row" id="copyRow" hidden>
+          <button type="button" class="primary" id="copy">Копіювати сюди</button>
+          <span class="status" id="copyNote" style="margin:0"></span>
+        </div>
+      </div>
+      <ul id="pcFiles" hidden></ul>
+    </div>
+    <p class="status"><a href="/panel/" style="color:var(--accent)">Адреси й налаштування трансляції</a></p>
+    <p class="status">Файли, надіслані на ПК, зберігаються в теці «Завантаження\SimpleVNC». Щоб вставити їх у потрібне місце, натисніть на ПК Ctrl+V.</p>
+
+    <h2>Автоматично на Mac</h2>
+    <div class="card">
+      <p style="margin:0 0 10px">Щоб текст синхронізувався сам — скопіювали на Mac, вставили на ПК і навпаки, — вставте цей рядок у програму «Термінал» на Mac і введіть пароль:</p>
+      <pre id="macCmd"></pre>
+      <div class="row">
+        <button type="button" id="copyCmd">Копіювати рядок</button>
+        <span class="status" id="cmdNote" style="margin:0"></span>
+      </div>
+      <p class="status">Працює, доки відкрите вікно Термінала. Файли передаються цією сторінкою.</p>
+    </div>
+  </section>
+</main>
+<script>
+  function $(id) { return document.getElementById(id); }
+  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+  // SHA-256 власноруч: вбудований crypto.subtle недоступний на сторінках без HTTPS.
+  function sha256hex(str) {
+    var bytes = new TextEncoder().encode(str), pow = Math.pow, max = pow(2, 32);
+    var h = [], k = [], n = 0, comp = {}, i, j;
+    for (var c = 2; n < 64; c++) {
+      if (!comp[c]) {
+        for (i = 0; i < 313; i += c) comp[i] = c;
+        h[n] = (pow(c, 0.5) * max) | 0;
+        k[n++] = (pow(c, 1 / 3) * max) | 0;
+      }
+    }
+    h = h.slice(0, 8);
+    var len = bytes.length, total = (((len + 8) >> 6) + 1) * 16, words = [];
+    for (i = 0; i < total; i++) words[i] = 0;
+    for (i = 0; i < len; i++) words[i >> 2] |= bytes[i] << (24 - (i % 4) * 8);
+    words[len >> 2] |= 0x80 << (24 - (len % 4) * 8);
+    words[total - 2] = ((len * 8) / max) | 0;
+    words[total - 1] = (len * 8) | 0;
+    for (j = 0; j < total; j += 16) {
+      var w = words.slice(j, j + 16), a = h.slice(0), t1, t2;
+      for (i = 0; i < 64; i++) {
+        if (i >= 16) {
+          var x = w[i - 15], y = w[i - 2];
+          w[i] = (w[i - 16] + (rotr(x, 7) ^ rotr(x, 18) ^ (x >>> 3)) + w[i - 7] + (rotr(y, 17) ^ rotr(y, 19) ^ (y >>> 10))) | 0;
+        }
+        t1 = (a[7] + (rotr(a[4], 6) ^ rotr(a[4], 11) ^ rotr(a[4], 25)) + ((a[4] & a[5]) ^ (~a[4] & a[6])) + k[i] + w[i]) | 0;
+        t2 = ((rotr(a[0], 2) ^ rotr(a[0], 13) ^ rotr(a[0], 22)) + ((a[0] & a[1]) ^ (a[0] & a[2]) ^ (a[1] & a[2]))) | 0;
+        a = [(t1 + t2) | 0, a[0], a[1], a[2], (a[3] + t1) | 0, a[4], a[5], a[6]];
+      }
+      for (i = 0; i < 8; i++) h[i] = (h[i] + a[i]) | 0;
+    }
+    return h.map(function (v) { return ('00000000' + (v >>> 0).toString(16)).slice(-8); }).join('');
+  }
+
+  function say(text, kind) {
+    var s = $('status');
+    s.textContent = text;
+    s.className = 'status' + (kind ? ' ' + kind : '');
+  }
+  function size(n) {
+    if (n < 0) return '';
+    var u = ['Б', 'КБ', 'МБ', 'ГБ'], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i ? n.toFixed(1) : n) + ' ' + u[i];
+  }
+
+  var lastSeq = null, pcText = '', timer = null;
+
+  function start() {
+    fetch('/clip/api/nonce').then(function (r) { return r.json(); }).then(function (n) {
+      $('host').textContent = n.name || '';
+      if (n.loggedIn) { showApp(); } else { $('login').hidden = false; $('pw').focus(); }
+    });
+  }
+  function showApp() {
+    // після входу повертаємо на сторінку, з якої прийшли (лише в межах цього сайту)
+    var next = new URLSearchParams(location.search).get('next');
+    if (next && /^\/[a-z]+\/$/.test(next)) { location.replace(next); return; }
+    $('login').hidden = true;
+    $('app').hidden = false;
+    refresh();
+    if (!timer) timer = setInterval(refresh, 2000);
+  }
+  $('loginForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    $('loginErr').textContent = '';
+    fetch('/clip/api/nonce').then(function (r) { return r.json(); }).then(function (n) {
+      return fetch('/clip/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nonce: n.nonce, proof: sha256hex(n.nonce + ':' + $('pw').value) })
+      });
+    }).then(function (r) {
+      if (r.ok) { $('pw').value = ''; showApp(); return; }
+      $('loginErr').textContent = r.status === 429 ? 'Забагато спроб. Зачекайте хвилину.' : 'Невірний пароль.';
+    });
+  });
+
+  function refresh() {
+    fetch('/clip/api/state').then(function (r) {
+      if (r.status === 401) { clearInterval(timer); timer = null; $('app').hidden = true; $('login').hidden = false; return null; }
+      return r.json();
+    }).then(function (s) {
+      if (!s || s.seq === lastSeq) return;
+      lastSeq = s.seq;
+      pcText = s.text || '';
+      var pre = $('pcText');
+      if (pcText) {
+        pre.textContent = pcText.length > 5000 ? pcText.slice(0, 5000) + '\n… (показано початок)' : pcText;
+        pre.className = '';
+      } else {
+        pre.textContent = s.files.length ? 'У буфері обміну ПК — файли:' : 'У буфері обміну ПК немає тексту.';
+        pre.className = 'empty';
+      }
+      $('copyRow').hidden = !pcText;
+      $('copyNote').textContent = s.truncated ? 'Текст дуже довгий — передано перший мегабайт.' : '';
+      var list = $('pcFiles');
+      list.textContent = '';
+      s.files.forEach(function (f, i) {
+        var li = document.createElement('li'), name = document.createElement('span'), right = document.createElement('span');
+        name.className = 'fname';
+        name.textContent = f.name;
+        right.className = 'fsize';
+        if (f.dir) {
+          right.textContent = 'тека — не передається';
+        } else {
+          var a = document.createElement('a');
+          a.className = 'btn';
+          a.href = '/clip/api/file?i=' + i;
+          a.download = f.name;
+          a.textContent = 'Завантажити · ' + size(f.size);
+          right.appendChild(a);
+        }
+        li.appendChild(name);
+        li.appendChild(right);
+        list.appendChild(li);
+      });
+      list.hidden = s.files.length === 0;
+    }).catch(function () {});
+  }
+
+  function copyOut(text, note) {
+    function done() { note.textContent = 'Скопійовано.'; setTimeout(function () { note.textContent = ''; }, 1500); }
+    if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).then(done); return; }
+    var t = document.createElement('textarea'); // на сторінці без HTTPS працює лише старий спосіб
+    t.value = text;
+    t.style.position = 'fixed';
+    t.style.opacity = '0';
+    document.body.appendChild(t);
+    t.select();
+    try { document.execCommand('copy'); done(); } catch (e) { note.textContent = 'Не вдалося — виділіть текст і скопіюйте вручну.'; }
+    document.body.removeChild(t);
+  }
+  $('copy').addEventListener('click', function () { copyOut(pcText, $('copyNote')); });
+  var macCmd = 'curl -s ' + location.origin + '/clip/mac.sh | bash';
+  $('macCmd').textContent = macCmd;
+  $('copyCmd').addEventListener('click', function () { copyOut(macCmd, $('cmdNote')); });
+
+  function sendText(text) {
+    if (!text) return;
+    say('Надсилаю текст…');
+    fetch('/clip/api/text', { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: text })
+      .then(function (r) {
+        if (r.ok) { say('Текст у буфері обміну ПК. Натисніть там Ctrl+V.', 'ok'); } else { say('Не вдалося надіслати текст.', 'err'); }
+        refresh();
+      });
+  }
+  function sendFiles(files) {
+    if (!files || !files.length) return;
+    var data = new FormData(), total = 0;
+    for (var i = 0; i < files.length; i++) { data.append('file', files[i], files[i].name); total += files[i].size; }
+    var x = new XMLHttpRequest();
+    x.open('POST', '/clip/api/upload');
+    x.upload.onprogress = function (e) {
+      if (e.lengthComputable) say('Надсилаю файли: ' + Math.round(e.loaded / e.total * 100) + '% з ' + size(total));
+    };
+    x.onload = function () {
+      if (x.status === 200) {
+        var res = JSON.parse(x.responseText);
+        say('Надіслано файлів: ' + res.saved.length + '. Вони в теці ' + res.dir + (res.clipboard ? ' і в буфері обміну ПК.' : '.'), 'ok');
+      } else {
+        say('Не вдалося надіслати файли.', 'err');
+      }
+      refresh();
+    };
+    x.onerror = function () { say('З’єднання обірвалося під час надсилання.', 'err'); };
+    say('Надсилаю файли…');
+    x.send(data);
+  }
+
+  $('send').addEventListener('click', function () { sendText($('text').value); });
+  $('pick').addEventListener('click', function () { $('files').click(); });
+  $('files').addEventListener('change', function () { sendFiles(this.files); this.value = ''; });
+  document.addEventListener('paste', function (e) {
+    if ($('app').hidden) return;
+    var cd = e.clipboardData;
+    if (cd.files && cd.files.length) { e.preventDefault(); sendFiles(cd.files); return; }
+    if (e.target === $('text')) return; // у полі тексту вставка працює як звичайно
+    var t = cd.getData('text/plain');
+    if (t) { e.preventDefault(); sendText(t); }
+  });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    document.addEventListener(ev, function (e) { if (!$('app').hidden) { e.preventDefault(); $('drop').classList.add('over'); } });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    document.addEventListener(ev, function (e) { e.preventDefault(); $('drop').classList.remove('over'); });
+  });
+  document.addEventListener('drop', function (e) { if (!$('app').hidden) sendFiles(e.dataTransfer.files); });
+  start();
+</script>
+</body>
+</html>

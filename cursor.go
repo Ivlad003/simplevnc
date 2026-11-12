@@ -153,8 +153,7 @@ func (c *cursorShape) scaled(pct int) *cursorShape {
 
 // cursorTrack — що вже опубліковано (стан потоку захоплення).
 type cursorTrack struct {
-	h     uintptr
-	scale int
+	h uintptr
 }
 
 // pollCursor перевіряє, чи змінилася форма курсора, і публікує нову клієнтам.
@@ -164,24 +163,24 @@ func (s *Screen) pollCursor(t *cursorTrack) {
 	if r == 0 || ci.flags&cursorShowing == 0 || ci.hCursor == 0 {
 		return
 	}
-	sc := int(s.scale.Load())
-	if ci.hCursor == t.h && sc == t.scale {
+	if ci.hCursor == t.h {
 		return
 	}
 	sh := grabCursorShape(ci.hCursor)
 	if sh == nil {
 		return
 	}
-	t.h, t.scale = ci.hCursor, sc
-	sh = sh.scaled(sc)
+	t.h = ci.hCursor
 	s.mu.Lock()
 	s.cur = sh
 	s.curSerial++
 	if s.curSerial < 2 { // 0 — «нічого не надіслано», 1 — прозорий курсор
 		s.curSerial = 2
 	}
-	for c := range s.clients {
-		c.notify()
+	for _, v := range s.views {
+		for c := range v.clients {
+			c.notify()
+		}
 	}
 	s.mu.Unlock()
 }
@@ -189,26 +188,22 @@ func (s *Screen) pollCursor(t *cursorTrack) {
 // refreshCursorMode вирішує, чи домальовувати курсор у кадр.
 func (s *Screen) refreshCursorMode() {
 	inFrame := forceDrawnCurs
-	s.mu.RLock()
-	for c := range s.clients {
+	clients := s.allClients()
+	for _, c := range clients {
 		c.mu.Lock()
 		if !c.canCursor {
 			inFrame = true
 		}
 		c.mu.Unlock()
 	}
-	clients := len(s.clients)
-	s.mu.RUnlock()
-	if clients == 0 {
+	if len(clients) == 0 {
 		inFrame = true
 	}
 	if cursorInFrame.Swap(inFrame) != inFrame {
 		s.stale.Store(true) // перемалювати кадр із курсором або без нього
-		s.mu.RLock()
-		for c := range s.clients {
+		for _, c := range clients {
 			c.notify()
 		}
-		s.mu.RUnlock()
 		s.poke()
 	}
 }
