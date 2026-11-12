@@ -37,15 +37,20 @@ type Client struct {
 	scr  *Screen
 	wmu  sync.Mutex // серіалізує записи в з'єднання
 
-	encMu   sync.Mutex // захищає enc і прапорці кодувань
-	enc     *encoder
-	encPref int32 // кодування, яке клієнт назвав першим серед підтримуваних
-	canSize bool
-	addr    string
-	knownW  int // розмір кадру, про який клієнт уже знає
-	knownH  int
-	nReq    int // лічильники для журналу перших кадрів
-	nUpd    int
+	encMu     sync.Mutex // захищає enc і прапорці кодувань
+	enc       *encoder
+	encPref   int32 // кодування, яке клієнт назвав першим серед підтримуваних
+	canSize   bool
+	addr      string
+	extClip   bool   // клієнт уміє розширений буфер обміну в UTF-8 (захищено mu)
+	apple     bool   // вбудований клієнт macOS (захищено mu)
+	canCursor bool   // клієнт сам малює курсор (захищено mu)
+	curSerial uint32 // яку форму курсора клієнт уже має (захищено mu)
+	cbuf      []byte
+	knownW    int // розмір кадру, про який клієнт уже знає
+	knownH    int
+	nReq      int // лічильники для журналу перших кадрів
+	nUpd      int
 
 	mu       sync.Mutex // захищає стан оновлень
 	tw, th   int
@@ -116,13 +121,15 @@ func writeReason(w io.Writer, msg string) {
 }
 
 // handshake виконує узгодження версії, автентифікацію та ініціалізацію.
-func (s *Server) handshake(conn net.Conn) (w, h int, err error) {
+func (s *Server) handshake(conn net.Conn) (w, h int, apple bool, err error) {
 	w, h = s.scr.frameSize()
-	return w, h, s.handshakeSize(conn, w, h)
+	err = s.handshakeSize(conn, w, h, &apple)
+	return w, h, apple, err
 }
 
-// handshakeSize веде рукостискання й повідомляє клієнту розмір кадру w x h.
-func (s *Server) handshakeSize(conn net.Conn, w, h int) error {
+// handshakeSize веде рукостискання й повідомляє клієнту розмір кадру w x h;
+// у isApple записує, чи це вбудований клієнт macOS.
+func (s *Server) handshakeSize(conn net.Conn, w, h int, isApple *bool) error {
 	ip, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	// Час щедрий: клієнти (зокрема Screen Sharing на macOS) спершу з'єднуються,
 	// а вже потім питають пароль у людини — сервер має дочекатися відповіді.
@@ -144,6 +151,7 @@ func (s *Server) handshakeSize(conn net.Conn, w, h int) error {
 	// Вбудований клієнт macOS (Screen Sharing) називає себе версією 003.889.
 	// Як і libvncserver, вважаємо його клієнтом 3.8 з одним винятком нижче.
 	apple := minor == 889
+	*isApple = apple
 	logf("%s: версія клієнта %q", addr, string(ver[:11]))
 	if minor > 8 {
 		minor = 8
@@ -224,7 +232,7 @@ func (s *Server) serve(conn net.Conn) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
 	logf("%s: нове з'єднання, чекаю на вхід", addr)
-	w, h, err := s.handshake(conn)
+	w, h, apple, err := s.handshake(conn)
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
@@ -236,7 +244,7 @@ func (s *Server) serve(conn net.Conn) {
 	}
 	logf("%s: підключено", addr)
 
-	c := &Client{conn: conn, scr: s.scr, enc: newEncoder(), sig: make(chan struct{}, 1), addr: addr, knownW: w, knownH: h}
+	c := &Client{conn: conn, scr: s.scr, enc: newEncoder(), sig: make(chan struct{}, 1), addr: addr, knownW: w, knownH: h, apple: apple}
 	s.scr.add(c)
 	done := make(chan struct{})
 	go c.sender(done)
@@ -244,7 +252,7 @@ func (s *Server) serve(conn net.Conn) {
 	err = c.reader()
 	close(done)
 	s.scr.remove(c)
-	c.in.releaseAll()
+	inputDo(c.in.releaseAll)
 	logf("%s: відключено (%v)", addr, err)
 }
 
@@ -269,6 +277,9 @@ func (c *Client) reader() error {
 			c.enc.setFormat(pf)
 			cmap := c.enc.cmap
 			c.encMu.Unlock()
+			c.mu.Lock()
+			c.curSerial = 0 // форму курсора треба надіслати знову в новому форматі
+			c.mu.Unlock()
 			if cmap {
 				c.sendColorMap()
 			}
@@ -279,7 +290,7 @@ func (c *Client) reader() error {
 			}
 			n := int(binary.BigEndian.Uint16(b[1:3]))
 			// Як у libvncserver: беремо перше з наших кодувань у порядку клієнта.
-			pref, size := int32(-1), false
+			pref, size, cursor, ext := int32(-1), false, false, false
 			list := make([]int32, 0, n)
 			for i := 0; i < n; i++ {
 				if _, err := io.ReadFull(br, b[:4]); err != nil {
@@ -294,6 +305,10 @@ func (c *Client) reader() error {
 					}
 				case encDesktopSize:
 					size = true
+				case encCursor:
+					cursor = true
+				case encExtClip:
+					ext = true
 				}
 			}
 			if pref < 0 {
@@ -303,6 +318,15 @@ func (c *Client) reader() error {
 			c.encMu.Lock()
 			c.encPref, c.canSize = pref, size
 			c.encMu.Unlock()
+			c.mu.Lock()
+			c.canCursor, c.curSerial = cursor, 0
+			newExt := ext && !c.extClip
+			c.extClip = ext
+			c.mu.Unlock()
+			if newExt {
+				c.sendClipCaps()
+			}
+			c.scr.refreshCursorMode()
 		case 3: // FramebufferUpdateRequest
 			if _, err := io.ReadFull(br, b[:9]); err != nil {
 				return err
@@ -328,28 +352,37 @@ func (c *Client) reader() error {
 			if _, err := io.ReadFull(br, b[:7]); err != nil {
 				return err
 			}
-			c.in.key(binary.BigEndian.Uint32(b[3:7]), b[0] != 0)
+			sym, down := binary.BigEndian.Uint32(b[3:7]), b[0] != 0
+			inputDo(func() { c.in.key(sym, down) })
 			c.touch()
 		case 5: // PointerEvent
 			if _, err := io.ReadFull(br, b[:5]); err != nil {
 				return err
 			}
-			c.in.pointer(int(binary.BigEndian.Uint16(b[1:3])), int(binary.BigEndian.Uint16(b[3:5])), b[0],
-				int(c.scr.fbW.Load()), int(c.scr.fbH.Load()))
+			px, py, mask := int(binary.BigEndian.Uint16(b[1:3])), int(binary.BigEndian.Uint16(b[3:5])), b[0]
+			inputDo(func() { c.in.pointer(px, py, mask, int(c.scr.fbW.Load()), int(c.scr.fbH.Load())) })
 			c.touch()
 		case 6: // ClientCutText
 			if _, err := io.ReadFull(br, b[:7]); err != nil {
 				return err
 			}
-			n := binary.BigEndian.Uint32(b[3:7])
-			if n > 8<<20 {
+			n := int32(binary.BigEndian.Uint32(b[3:7]))
+			extended := n < 0 // від'ємна довжина — розширений буфер обміну
+			if extended {
+				n = -n
+			}
+			if n < 0 || n > 8<<20 {
 				return errors.New("завеликий буфер обміну")
 			}
 			txt := make([]byte, n)
 			if _, err := io.ReadFull(br, txt); err != nil {
 				return err
 			}
-			setClipboard(txt)
+			if extended {
+				c.handleExtClip(txt)
+			} else {
+				setClipboard(txt)
+			}
 		default:
 			return fmt.Errorf("невідоме повідомлення клієнта: тип %d", typ)
 		}
@@ -412,7 +445,18 @@ func (c *Client) sendUpdate() error {
 	s := c.scr
 	s.mu.RLock()
 	c.mu.Lock()
-	if !c.want || !c.fresh || !c.anyDirty || len(c.dirty) != s.tw*s.th {
+	// курсор на боці клієнта: справжня форма або прозорий, якщо курсор уже в кадрі
+	var curWant uint32
+	var curShape *cursorShape
+	if c.canCursor {
+		if cursorInFrame.Load() {
+			curWant = 1
+		} else if s.cur != nil {
+			curWant, curShape = s.curSerial, s.cur
+		}
+	}
+	curPending := curWant != 0 && curWant != c.curSerial
+	if !c.want || !c.fresh || (!c.anyDirty && !curPending) || len(c.dirty) != s.tw*s.th {
 		c.mu.Unlock()
 		s.mu.RUnlock()
 		return nil
@@ -439,21 +483,38 @@ func (c *Client) sendUpdate() error {
 		binary.BigEndian.PutUint32(m[12:], uint32(0xFFFFFFFF-222)) // -223
 		return c.write(m)
 	}
-	dirty := c.dirty
-	if len(c.spare) == len(dirty) {
-		c.dirty = c.spare
-	} else {
-		c.dirty = make([]bool, len(dirty))
+	var dirty []bool
+	if c.anyDirty {
+		dirty = c.dirty
+		if len(c.spare) == len(dirty) {
+			c.dirty = c.spare
+		} else {
+			c.dirty = make([]bool, len(dirty))
+		}
+		c.spare = nil
+		c.anyDirty = false
 	}
-	c.spare = nil
-	c.anyDirty = false
+	if curPending {
+		c.curSerial = curWant
+	}
 	c.mu.Unlock()
 
-	c.rs = mergeRects(dirty, s.tw, s.th, s.w, s.h, c.rs)
+	c.rs = c.rs[:0]
+	if dirty != nil {
+		c.rs = mergeRects(dirty, s.tw, s.th, s.w, s.h, c.rs)
+	}
+	nRects := len(c.rs)
+	if curPending {
+		nRects++
+	}
 	stride := s.w * 4
 	c.out.Reset()
-	c.out.Write([]byte{0, 0, byte(len(c.rs) >> 8), byte(len(c.rs))})
+	c.out.Write([]byte{0, 0, byte(nRects >> 8), byte(nRects)})
 	c.encMu.Lock()
+	if curPending {
+		c.cbuf = c.enc.cursorRect(c.cbuf[:0], curShape)
+		c.out.Write(c.cbuf)
+	}
 	var hdr [12]byte
 	for _, r := range c.rs {
 		binary.BigEndian.PutUint16(hdr[0:], uint16(r.x))
@@ -482,11 +543,13 @@ func (c *Client) sendUpdate() error {
 			c.addr, len(c.rs), c.out.Len(), pref, err)
 	}
 
-	for i := range dirty {
-		dirty[i] = false
+	if dirty != nil {
+		for i := range dirty {
+			dirty[i] = false
+		}
+		c.mu.Lock()
+		c.spare = dirty
+		c.mu.Unlock()
 	}
-	c.mu.Lock()
-	c.spare = dirty
-	c.mu.Unlock()
 	return err
 }

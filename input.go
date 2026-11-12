@@ -212,11 +212,20 @@ func (st *inputState) key(sym uint32, down bool) {
 // зменшеною копією екрана; абсолютні координати Windows від масштабу не залежать.
 func (st *inputState) pointer(x, y int, mask byte, fbW, fbH int) {
 	in := mouseInput{flags: mouseMove | mouseAbsolute | mouseVirtualDesk}
+	ax, ay, aw, ah := captureArea()
+	vx, vy, vw, vh := virtualScreen()
+	px, py := ax-vx, ay-vy // піксель віртуального екрана
 	if fbW > 1 {
-		in.dx = int32((min(x, fbW-1)*65535 + (fbW-1)/2) / (fbW - 1))
+		px += (min(x, fbW-1)*(aw-1) + (fbW-1)/2) / (fbW - 1)
 	}
 	if fbH > 1 {
-		in.dy = int32((min(y, fbH-1)*65535 + (fbH-1)/2) / (fbH - 1))
+		py += (min(y, fbH-1)*(ah-1) + (fbH-1)/2) / (fbH - 1)
+	}
+	if vw > 1 {
+		in.dx = int32((px*65535 + (vw-1)/2) / (vw - 1))
+	}
+	if vh > 1 {
+		in.dy = int32((py*65535 + (vh-1)/2) / (vh - 1))
 	}
 	ch := mask ^ st.buttons
 	st.buttons = mask

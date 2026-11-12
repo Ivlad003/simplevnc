@@ -26,7 +26,7 @@ type gdiCap struct {
 
 func newGdiCap() *gdiCap {
 	c := &gdiCap{}
-	c.vx, c.vy, c.w, c.h = virtualScreen()
+	c.vx, c.vy, c.w, c.h = captureArea()
 	c.screenDC, _, _ = pGetDC.Call(0)
 	c.memDC, _, _ = pCreateCompatibleDC.Call(c.screenDC)
 	bi := bitmapInfoHeader{
@@ -68,7 +68,9 @@ func (c *gdiCap) blit() bool {
 	if r == 0 {
 		return false
 	}
-	c.drawCursor()
+	if cursorInFrame.Load() {
+		c.drawCursor()
+	}
 	return true
 }
 
@@ -104,6 +106,9 @@ type Screen struct {
 	fb      []byte // BGRX, актуальний кадр
 	clients map[*Client]struct{}
 
+	cur       *cursorShape // форма курсора для клієнтів, що малюють його самі
+	curSerial uint32
+
 	scale    atomic.Int32 // відсоток розміру кадру (100 — без зменшення)
 	fbW, fbH atomic.Int32 // поточний розмір кадру для клієнтів
 
@@ -115,7 +120,8 @@ type Screen struct {
 func newScreen() *Screen {
 	s := &Screen{clients: map[*Client]struct{}{}, wake: make(chan struct{}, 1)}
 	s.scale.Store(100)
-	s.vx, s.vy, s.w, s.h = virtualScreen()
+	cursorInFrame.Store(true)
+	s.vx, s.vy, s.w, s.h = captureArea()
 	s.resize(s.w, s.h)
 	return s
 }
@@ -144,6 +150,7 @@ func (s *Screen) add(c *Client) {
 	s.clients[c] = struct{}{}
 	s.stale.Store(true)
 	s.mu.Unlock()
+	s.refreshCursorMode()
 	s.poke()
 }
 
@@ -151,6 +158,7 @@ func (s *Screen) remove(c *Client) {
 	s.mu.Lock()
 	delete(s.clients, c)
 	s.mu.Unlock()
+	s.refreshCursorMode()
 }
 
 func (s *Screen) anyWaiting() bool {
@@ -206,6 +214,8 @@ func (s *Screen) run() {
 	var scaled []byte
 	var scaledFrom [2]int
 	var xmap []int32
+	var curTrack cursorTrack
+	var desk deskFollower
 	var kind string
 	var retryDX time.Time
 	retryEvery := 10 * time.Second
@@ -235,7 +245,12 @@ func (s *Screen) run() {
 		}
 		start := time.Now()
 
-		vx, vy, w, h := virtualScreen()
+		// у режимі служби переходимо на захищений робочий стіл (UAC, екран входу)
+		if start.Sub(desk.checked) > 250*time.Millisecond {
+			desk.follow(drop)
+		}
+
+		vx, vy, w, h := captureArea()
 		if cap != nil {
 			if cx, cy, cw, ch := cap.geom(); cx != vx || cy != vy || cw != w || ch != h {
 				drop()
@@ -267,9 +282,12 @@ func (s *Screen) run() {
 		if !ok {
 			// робочий стіл недоступний (UAC, екран блокування, зміна режиму)
 			drop()
-			time.Sleep(200 * time.Millisecond)
+			if !desk.follow(nil) {
+				time.Sleep(200 * time.Millisecond)
+			}
 			continue
 		}
+		s.pollCursor(&curTrack)
 		if !got && (!s.stale.Load() || !cap.valid()) {
 			continue // екран не змінювався; grab уже зачекав
 		}
@@ -366,7 +384,7 @@ func (s *Screen) run() {
 
 // frameSize — розмір кадру, який бачать клієнти за поточного масштабу.
 func (s *Screen) frameSize() (int, int) {
-	_, _, w, h := virtualScreen()
+	_, _, w, h := captureArea()
 	if sc := int(s.scale.Load()); sc > 0 && sc < 100 {
 		w, h = max(w*sc/100, 64), max(h*sc/100, 64)
 	}

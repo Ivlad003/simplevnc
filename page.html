@@ -20,7 +20,7 @@
     margin: 0; background: var(--bg); color: var(--text);
     font: 16px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
   }
-  main { max-width: 920px; margin: 0 auto; padding: 32px 16px 56px; }
+  main { max-width: 960px; margin: 0 auto; padding: 32px 16px 56px; }
   header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 8px; }
   h1 { font-size: 28px; margin: 0; letter-spacing: -0.01em; }
   .host { color: var(--muted); font-size: 18px; }
@@ -30,13 +30,17 @@
   .status.on .dot { background: var(--ok); }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 32px 0 12px; font-weight: 600; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
-  .label { color: var(--muted); font-size: 14px; margin-bottom: 14px; }
-  .qr { background: #fff; border-radius: 8px; padding: 6px; width: 196px; height: 196px; display: block; margin: 0 auto 16px; }
+  .wide { grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; min-width: 0; }
+  .label { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+  .pair { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-around; }
+  .way { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; min-width: 168px; flex: 1; }
+  .way h3 { font-size: 16px; margin: 0; }
+  .way p { margin: 0; color: var(--muted); font-size: 14px; }
+  .qr { background: #fff; border-radius: 8px; padding: 4px; width: 168px; height: 168px; }
   .qr img { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
   .mono { font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; font-variant-numeric: tabular-nums; }
-  .addr { font-size: 20px; font-weight: 600; text-align: center; word-break: break-all; }
-  .row { display: flex; gap: 8px; justify-content: center; margin-top: 14px; flex-wrap: wrap; }
+  .addr { font-size: 16px; font-weight: 600; word-break: break-all; }
   button, a.btn {
     font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 8px; cursor: pointer;
     border: 1px solid var(--line); background: transparent; color: var(--text); text-decoration: none;
@@ -48,6 +52,8 @@
   .pass .value { font-size: 28px; font-weight: 600; letter-spacing: 0.06em; }
   .warn { color: var(--warn); }
   .seg { display: flex; flex-wrap: wrap; gap: 8px; }
+  .sub { font-size: 14px; color: var(--muted); margin: 18px 0 8px; }
+  .sub:first-child { margin-top: 0; }
   .hint { color: var(--muted); font-size: 14px; margin: 12px 0 0; }
   ol { margin: 0; padding-left: 20px; }
   li { margin-bottom: 4px; }
@@ -63,16 +69,26 @@
   </header>
   <div class="status" id="status"><span class="dot"></span><span id="statusText">Перевіряю…</span></div>
 
-  <h2>Адреси для підключення</h2>
-  <div class="grid">
+  <h2>Як підключитися</h2>
+  <div class="grid wide">
     {{range $i, $a := .Addrs}}
     <div class="card">
       <div class="label">{{$a.Label}}</div>
-      <div class="qr"><img src="/qr.png?i={{$i}}" alt="QR-код адреси {{$a.URL}}"></div>
-      <div class="addr mono">{{$a.Host}}</div>
-      <div class="row">
-        <button type="button" data-copy="{{$a.Host}}">Копіювати</button>
-        <a class="btn" href="{{$a.URL}}">Відкрити vnc://</a>
+      <div class="pair">
+        {{if $a.WebURL}}
+        <div class="way">
+          <div class="qr"><img src="/qr.png?i={{$i}}&amp;k=web" alt="QR-код веб-клієнта для адреси {{$a.IP}}"></div>
+          <h3>У браузері</h3>
+          <p>iPad, телефон — без застосунку</p>
+          <a class="btn" href="{{$a.WebURL}}" target="_blank" rel="noopener">Відкрити</a>
+        </div>
+        {{end}}
+        <div class="way">
+          <div class="qr"><img src="/qr.png?i={{$i}}" alt="QR-код адреси {{$a.URL}}"></div>
+          <h3>VNC-клієнт</h3>
+          <p class="addr mono">{{$a.Host}}</p>
+          <button type="button" data-copy="{{$a.Host}}">Копіювати адресу</button>
+        </div>
       </div>
     </div>
     {{else}}
@@ -82,16 +98,22 @@
 
   <h2>Пароль</h2>
   <div class="card pass">
-    {{if .Password}}
+    {{if .Service}}
+    <span>Пароль задано під час встановлення служби й тут не показується.</span>
+    {{else if .Password}}
     <span class="value mono">{{.Password}}</span>
     <button type="button" data-copy="{{.Password}}">Копіювати</button>
+    {{if .Web}}<span class="hint" style="margin:0">QR-код «У браузері» вже містить пароль.</span>{{end}}
     {{else}}
     <span class="warn">Пароль вимкнено — підключитися може будь-хто в мережі.</span>
     {{end}}
   </div>
 
-  <h2>Роздільність трансляції</h2>
+  <h2>Що транслювати</h2>
   <div class="card">
+    <div class="sub">Область екрана</div>
+    <div class="seg" id="areas"></div>
+    <div class="sub">Роздільність</div>
     <div class="seg" id="seg">
       {{range .Steps}}<button type="button" data-scale="{{.}}">{{.}}%</button>{{end}}
     </div>
@@ -99,7 +121,7 @@
     <p class="hint">Менший кадр швидше передається повільною мережею й зручніший на телефоні. Картинка завжди без втрат якості. Після зміни клієнт може перепідключитися.</p>
   </div>
 
-  <h2>Як підключитися</h2>
+  <h2>Підказки</h2>
   <div class="grid how">
     <div class="card">
       <h3>Mac</h3>
@@ -112,9 +134,9 @@
     <div class="card">
       <h3>iPhone, iPad, Android</h3>
       <ol>
-        <li>Встановіть VNC-клієнт, наприклад RealVNC Viewer.</li>
-        <li>Наведіть камеру на QR-код або введіть адресу вручну.</li>
-        <li>Введіть пароль.</li>
+        <li>Наведіть камеру на QR-код «У браузері».</li>
+        <li>Відкрийте посилання — екран з'явиться одразу.</li>
+        <li>Клавіатура й додаткові клавіші — у панелі зліва.</li>
       </ol>
     </div>
     <div class="card">
@@ -126,7 +148,7 @@
       </ol>
     </div>
   </div>
-  <p class="hint">Ця сторінка відкривається лише на цьому комп'ютері. Щоб зупинити сервер, закрийте вікно SimpleVNC.</p>
+  <p class="hint">Ця сторінка відкривається лише на цьому комп'ютері. {{if .Service}}Сервер працює як служба Windows.{{else}}Щоб зупинити сервер, закрийте вікно SimpleVNC. Вікна дозволу Windows (UAC) та екран входу видно лише в режимі служби: <code>SimpleVNC.exe -install</code>.{{end}}</p>
 </main>
 <script>
   document.querySelectorAll('[data-copy]').forEach(function (b) {
@@ -138,6 +160,8 @@
       });
     });
   });
+  var areasKey = '';
+  function post(path) { return fetch(path, { method: 'POST' }).then(refresh); }
   function refresh() {
     fetch('/api/status').then(function (r) { return r.json(); }).then(function (s) {
       var st = document.getElementById('status');
@@ -148,17 +172,32 @@
       document.querySelectorAll('[data-scale]').forEach(function (b) {
         b.classList.toggle('active', Number(b.dataset.scale) === s.scale);
       });
+      var key = JSON.stringify(s.areas);
+      var box = document.getElementById('areas');
+      if (key !== areasKey) { // список областей змінився (наприклад, підключили монітор)
+        areasKey = key;
+        box.textContent = '';
+        s.areas.forEach(function (a) {
+          var b = document.createElement('button');
+          b.type = 'button';
+          b.dataset.area = a.id;
+          b.textContent = a.label;
+          b.addEventListener('click', function () { post('/api/area?v=' + encodeURIComponent(a.id)); });
+          box.appendChild(b);
+        });
+      }
+      box.querySelectorAll('[data-area]').forEach(function (b) {
+        b.classList.toggle('active', b.dataset.area === s.area);
+      });
       document.getElementById('frameInfo').textContent =
-        'Екран ' + s.screen + ' → клієнт отримує ' + s.frame + '.';
+        'Область ' + s.screen + ' → клієнт отримує ' + s.frame + '.';
     }).catch(function () {
       document.getElementById('status').classList.remove('on');
       document.getElementById('statusText').textContent = 'Сервер зупинено';
     });
   }
   document.querySelectorAll('[data-scale]').forEach(function (b) {
-    b.addEventListener('click', function () {
-      fetch('/api/scale?v=' + b.dataset.scale, { method: 'POST' }).then(refresh);
-    });
+    b.addEventListener('click', function () { post('/api/scale?v=' + b.dataset.scale); });
   });
   refresh();
   setInterval(refresh, 2000);

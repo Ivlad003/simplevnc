@@ -97,6 +97,7 @@ type dxgiCap struct {
 	*gdiCap // DIB-буфер кадру та малювання курсора
 	outs    []dxOut
 	ready   bool
+	drawn   bool // чи курсор намальовано в останньому зібраному кадрі
 	created time.Time
 }
 
@@ -155,8 +156,9 @@ func (c *dxgiCap) addAdapter(adapter uintptr) bool {
 		}
 		var d dxgiOutputDesc
 		comCall(output, 7, uintptr(unsafe.Pointer(&d))) // GetDesc
-		if d.attached == 0 {
-			release(output)
+		if d.attached == 0 || int(d.right) <= c.vx || int(d.left) >= c.vx+c.w ||
+			int(d.bottom) <= c.vy || int(d.top) >= c.vy+c.h {
+			release(output) // вимкнений монітор або поза областю трансляції
 			continue
 		}
 		if d.rotation > 1 { // повернутий монітор — простіше через GDI
@@ -220,6 +222,7 @@ func (c *dxgiCap) close() {
 // grab чекає на новий кадр до wait. changed=false — екран не змінювався.
 func (c *dxgiCap) grab(wait time.Duration) (changed, ok bool) {
 	start := time.Now()
+	image := false
 	for i := range c.outs {
 		o := &c.outs[i]
 		timeout := uintptr(0)
@@ -240,6 +243,7 @@ func (c *dxgiCap) grab(wait time.Duration) (changed, ok bool) {
 		good := true
 		if info.lastPresent != 0 || info.accumulated != 0 {
 			good = o.copyFrame(res)
+			image = true
 		}
 		release(res)
 		comCall(o.dup, 14) // ReleaseFrame
@@ -258,23 +262,26 @@ func (c *dxgiCap) grab(wait time.Duration) (changed, ok bool) {
 			return false, true
 		}
 	}
-	if !changed {
-		if len(c.outs) > 1 {
-			if d := wait - time.Since(start); d > 0 {
-				time.Sleep(d)
-			}
+	if !changed && len(c.outs) > 1 {
+		if d := wait - time.Since(start); d > 0 {
+			time.Sleep(d)
 		}
-		if c.ready {
-			return false, true
-		}
+	}
+	// Збираємо кадр, коли змінилося зображення; сам рух миші важить лише тоді,
+	// коли курсор домальовується в кадр.
+	inFrame := cursorInFrame.Load()
+	if c.ready && !image && !(changed && inFrame) && inFrame == c.drawn {
+		return false, true
 	}
 	for i := range c.outs {
 		if !c.outs[i].compose(c.gdiCap) {
 			return false, false
 		}
 	}
-	c.drawCursor()
-	c.ready = true
+	if inFrame {
+		c.drawCursor()
+	}
+	c.ready, c.drawn = true, inFrame
 	return true, true
 }
 

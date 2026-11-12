@@ -24,10 +24,11 @@ var pageTmpl = template.Must(template.New("page").Parse(pageHTML))
 
 // addrInfo — адреса, за якою сервер видно ззовні.
 type addrInfo struct {
-	IP    string
-	Label string
-	URL   template.URL // vnc://ip:port; довірений тип, інакше шаблон вирізає схему vnc
-	Host  string       // ip:port
+	IP     string
+	Label  string
+	URL    template.URL // vnc://ip:port; довірений тип, інакше шаблон вирізає схему vnc
+	Host   string       // ip:port
+	WebURL template.URL // веб-клієнт у браузері; порожньо, якщо його не запущено
 }
 
 // virtualAdapter — мережеві адаптери, недосяжні з інших пристроїв.
@@ -84,11 +85,29 @@ type webUI struct {
 	port     int
 	bind     string
 	httpAddr string
+	webPort  int // порт веб-клієнта; 0 — не запущено
+}
+
+// addrs — адреси з посиланнями на веб-клієнт. У звичайному режимі пароль входить
+// у посилання (сторінку бачить лише той, хто за цим ПК), у режимі служби — ні.
+func (u *webUI) addrs() []addrInfo {
+	list := listAddrs(u.port, u.bind)
+	if u.webPort == 0 {
+		return list
+	}
+	pw := u.srv.password
+	if serviceMode {
+		pw = ""
+	}
+	for i := range list {
+		list[i].WebURL = template.URL("http://" + net.JoinHostPort(list[i].IP, strconv.Itoa(u.webPort)) + webClientPath(pw))
+	}
+	return list
 }
 
 // startWeb піднімає сторінку підключення лише на 127.0.0.1: її бачить той, хто
 // сидить за цим ПК, а пароль не потрапляє в мережу.
-func startWeb(srv *Server, port int, bind string) (*webUI, error) {
+func startWeb(srv *Server, port int, bind string, webPort int) (*webUI, error) {
 	var ln net.Listener
 	var err error
 	for p := 5980; p < 6080; p++ {
@@ -99,12 +118,13 @@ func startWeb(srv *Server, port int, bind string) (*webUI, error) {
 	if err != nil {
 		return nil, err
 	}
-	u := &webUI{srv: srv, port: port, bind: bind, httpAddr: ln.Addr().String()}
+	u := &webUI{srv: srv, port: port, bind: bind, httpAddr: ln.Addr().String(), webPort: webPort}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", u.guard(u.page))
 	mux.HandleFunc("/qr.png", u.guard(u.qr))
 	mux.HandleFunc("/api/status", u.guard(u.status))
 	mux.HandleFunc("/api/scale", u.guard(u.setScale))
+	mux.HandleFunc("/api/area", u.guard(u.setArea))
 	go http.Serve(ln, mux)
 	return u, nil
 }
@@ -142,27 +162,36 @@ func (u *webUI) page(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	pageTmpl.Execute(w, map[string]any{
 		"Name":     u.srv.name,
-		"Addrs":    listAddrs(u.port, u.bind),
+		"Addrs":    u.addrs(),
 		"Password": u.srv.password,
+		"Service":  serviceMode,
 		"Port":     u.port,
+		"Web":      u.webPort != 0,
 		"Steps":    scaleSteps,
 	})
 }
 
-// qr віддає QR-код адреси з номером i.
+// qr віддає QR-код адреси з номером i: k=web — посилання на веб-клієнт, інакше vnc://.
 func (u *webUI) qr(w http.ResponseWriter, r *http.Request) {
-	addrs := listAddrs(u.port, u.bind)
+	addrs := u.addrs()
 	i, err := strconv.Atoi(r.URL.Query().Get("i"))
 	if err != nil || i < 0 || i >= len(addrs) {
 		http.NotFound(w, r)
 		return
 	}
-	code, err := qr.Encode(string(addrs[i].URL), qr.M)
+	text := string(addrs[i].URL)
+	if r.URL.Query().Get("k") == "web" {
+		if text = string(addrs[i].WebURL); text == "" {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	code, err := qr.Encode(text, qr.M)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	code.Scale = 8
+	code.Scale = 6
 	w.Header().Set("Content-Type", "image/png")
 	w.Write(code.PNG())
 }
@@ -176,19 +205,20 @@ func (u *webUI) status(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 	sort.Strings(clients)
-	_, _, sw, sh := virtualScreen()
+	_, _, aw, ah := captureArea()
 	sc := int(s.scale.Load())
 	if sc <= 0 || sc >= 100 {
 		sc = 100
 	}
 	fw, fh := s.frameSize()
-	frame := fmt.Sprintf("%d×%d", fw, fh)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"clients": clients,
 		"scale":   sc,
-		"screen":  fmt.Sprintf("%d×%d", sw, sh),
-		"frame":   frame,
+		"screen":  fmt.Sprintf("%d×%d", aw, ah),
+		"frame":   fmt.Sprintf("%d×%d", fw, fh),
+		"area":    areaID(),
+		"areas":   areaChoices(),
 	})
 }
 
@@ -203,5 +233,19 @@ func (u *webUI) setScale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logf("масштаб кадру змінено на %d%%", v)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (u *webUI) setArea(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.URL.Query().Get("v")
+	if err := u.srv.scr.setArea(id); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	logf("область трансляції змінено на %s", id)
 	w.WriteHeader(http.StatusNoContent)
 }
