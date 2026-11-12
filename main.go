@@ -43,6 +43,8 @@ type options struct {
 	area     string
 	noOpen   bool
 	bonjour  bool
+	agentPw  string
+	agentRO  bool
 }
 
 func main() {
@@ -56,6 +58,8 @@ func main() {
 	noOpen := flag.Bool("noopen", false, "не відкривати сторінку підключення в браузері")
 	area := flag.String("area", "all", "що транслювати: all, left, right, m1, m2… або x,y,ширина,висота")
 	flag.BoolVar(&forceDrawnCurs, "drawcursor", false, "завжди малювати курсор у кадрі (видно рухи миші за самим ПК)")
+	agentPass := flag.String("agentpass", "", "окремий пароль для ШІ-агентів (до 8 символів): без доступу до вікон дозволу Windows")
+	agentView := flag.Bool("agentview", false, "агенти з паролем -agentpass лише дивляться, без миші та клавіатури")
 	noBonjour := flag.Bool("nobonjour", false, "не оголошувати ПК у локальній мережі (Finder на Mac)")
 	install := flag.Bool("install", false, "встановити як службу Windows: автозапуск, вікна UAC та екран входу")
 	uninstall := flag.Bool("uninstall", false, "видалити службу Windows")
@@ -74,13 +78,21 @@ func main() {
 		password = password[:8] // VNC-автентифікація використовує лише 8 символів
 	}
 
+	if len(*agentPass) > 8 {
+		*agentPass = (*agentPass)[:8]
+	}
+	if *agentPass != "" && *agentPass == password {
+		fmt.Println("Пароль для агентів збігається з основним — обмеження для агентів не діятимуть. Задайте інший.")
+		os.Exit(2)
+	}
+
 	switch {
 	case *service:
 		serviceMode = true
 		runService()
 		return
 	case *install || *uninstall:
-		c := svcConfig{Password: password, Scale: *scale, Area: *area}
+		c := svcConfig{Password: password, Scale: *scale, Area: *area, AgentPassword: *agentPass, AgentView: *agentView}
 		if explicitPort {
 			c.Port = *port
 		}
@@ -88,7 +100,7 @@ func main() {
 	}
 
 	o := options{port: *port, portAuto: !explicitPort, bind: *bind, password: password,
-		scale: *scale, area: *area, noOpen: *noOpen, bonjour: !*noBonjour}
+		scale: *scale, area: *area, noOpen: *noOpen, bonjour: !*noBonjour, agentPw: *agentPass, agentRO: *agentView}
 	if *worker {
 		serviceMode = true
 		setupFileLog()
@@ -98,7 +110,7 @@ func main() {
 			os.Exit(1)
 		}
 		o = options{port: c.Port, portAuto: true, password: c.Password, scale: c.Scale, area: c.Area,
-			noOpen: true, bonjour: true}
+			noOpen: true, bonjour: true, agentPw: c.AgentPassword, agentRO: c.AgentView}
 	} else {
 		switch {
 		case *nopass:
@@ -142,7 +154,11 @@ func runServer(o options) {
 	if !scr.setScale(o.scale) {
 		logf("невідомий масштаб, лишаю 100%%; дозволені: %v", scaleSteps)
 	}
-	srv := &Server{scr: scr, password: o.password, name: host, fails: map[string]*failRec{}}
+	srv := &Server{scr: scr, password: o.password, name: host, fails: map[string]*failRec{},
+		agentPassword: o.agentPw, agentView: o.agentRO}
+	if o.password == "" {
+		srv.agentPassword = "" // без основного пароля окремий пароль агента не має сенсу
+	}
 	go inputLoop()
 	go scr.run()
 	go scr.watchClipboard()
@@ -168,6 +184,13 @@ func runServer(o options) {
 			fmt.Println("  Пароль:  немає (будь-хто в мережі може підключитися!)")
 		} else {
 			fmt.Printf("  Пароль:  %s\n", o.password)
+		}
+		if srv.agentPassword != "" {
+			mode := "керування без вікон дозволу Windows"
+			if srv.agentView {
+				mode = "лише перегляд"
+			}
+			fmt.Printf("  Пароль для агентів: %s (%s)\n", srv.agentPassword, mode)
 		}
 	}
 	webPort, err := startWebClient(srv, o.bind)

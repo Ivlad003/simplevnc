@@ -23,6 +23,12 @@ type Server struct {
 	password string // порожній — без пароля
 	name     string
 
+	// Окремий пароль для ШІ-агентів. Сеанс із ним обмежений: не може нічого
+	// натискати на захищеному робочому столі (вікна дозволу Windows, екран входу),
+	// а з agentView — взагалі лише дивиться.
+	agentPassword string
+	agentView     bool
+
 	mu    sync.Mutex
 	fails map[string]*failRec
 }
@@ -42,6 +48,8 @@ type Client struct {
 	encPref   int32 // кодування, яке клієнт назвав першим серед підтримуваних
 	canSize   bool
 	addr      string
+	agent     bool   // сеанс агента (увійшов із паролем для агентів)
+	noInput   bool   // ввід від цього клієнта ігнорується
 	extClip   bool   // клієнт уміє розширений буфер обміну в UTF-8 (захищено mu)
 	apple     bool   // вбудований клієнт macOS (захищено mu)
 	canCursor bool   // клієнт сам малює курсор (захищено mu)
@@ -121,15 +129,20 @@ func writeReason(w io.Writer, msg string) {
 }
 
 // handshake виконує узгодження версії, автентифікацію та ініціалізацію.
-func (s *Server) handshake(conn net.Conn) (w, h int, apple bool, err error) {
-	w, h = s.scr.frameSize()
-	err = s.handshakeSize(conn, w, h, &apple)
-	return w, h, apple, err
+// hsInfo — що з'ясувалося під час рукостискання.
+type hsInfo struct {
+	apple bool // вбудований клієнт macOS
+	agent bool // увійшов із паролем для агентів
 }
 
-// handshakeSize веде рукостискання й повідомляє клієнту розмір кадру w x h;
-// у isApple записує, чи це вбудований клієнт macOS.
-func (s *Server) handshakeSize(conn net.Conn, w, h int, isApple *bool) error {
+func (s *Server) handshake(conn net.Conn) (w, h int, info hsInfo, err error) {
+	w, h = s.scr.frameSize()
+	err = s.handshakeSize(conn, w, h, &info)
+	return w, h, info, err
+}
+
+// handshakeSize веде рукостискання й повідомляє клієнту розмір кадру w x h.
+func (s *Server) handshakeSize(conn net.Conn, w, h int, info *hsInfo) error {
 	ip, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	// Час щедрий: клієнти (зокрема Screen Sharing на macOS) спершу з'єднуються,
 	// а вже потім питають пароль у людини — сервер має дочекатися відповіді.
@@ -151,7 +164,7 @@ func (s *Server) handshakeSize(conn net.Conn, w, h int, isApple *bool) error {
 	// Вбудований клієнт macOS (Screen Sharing) називає себе версією 003.889.
 	// Як і libvncserver, вважаємо його клієнтом 3.8 з одним винятком нижче.
 	apple := minor == 889
-	*isApple = apple
+	info.apple = apple
 	logf("%s: версія клієнта %q", addr, string(ver[:11]))
 	if minor > 8 {
 		minor = 8
@@ -194,6 +207,9 @@ func (s *Server) handshakeSize(conn net.Conn, w, h int, isApple *bool) error {
 			return err
 		}
 		ok := subtle.ConstantTimeCompare(resp, vncResponse(s.password, ch)) == 1
+		if !ok && s.agentPassword != "" && subtle.ConstantTimeCompare(resp, vncResponse(s.agentPassword, ch)) == 1 {
+			ok, info.agent = true, true
+		}
 		s.authResult(ip, ok)
 		if !ok {
 			time.Sleep(time.Second)
@@ -232,7 +248,7 @@ func (s *Server) serve(conn net.Conn) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
 	logf("%s: нове з'єднання, чекаю на вхід", addr)
-	w, h, apple, err := s.handshake(conn)
+	w, h, info, err := s.handshake(conn)
 	if err != nil {
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
@@ -242,9 +258,17 @@ func (s *Server) serve(conn net.Conn) {
 		}
 		return
 	}
-	logf("%s: підключено", addr)
-
-	c := &Client{conn: conn, scr: s.scr, enc: newEncoder(), sig: make(chan struct{}, 1), addr: addr, knownW: w, knownH: h, apple: apple}
+	c := &Client{conn: conn, scr: s.scr, enc: newEncoder(), sig: make(chan struct{}, 1), addr: addr,
+		knownW: w, knownH: h, apple: info.apple, agent: info.agent, noInput: info.agent && s.agentView}
+	c.in.exact = info.agent
+	switch {
+	case c.noInput:
+		logf("%s: підключено агента (лише перегляд)", addr)
+	case c.agent:
+		logf("%s: підключено агента", addr)
+	default:
+		logf("%s: підключено", addr)
+	}
 	s.scr.add(c)
 	done := make(chan struct{})
 	go c.sender(done)
@@ -293,7 +317,7 @@ func (c *Client) reader() error {
 			}
 			n := int(binary.BigEndian.Uint16(b[1:3]))
 			// Як у libvncserver: беремо перше з наших кодувань у порядку клієнта.
-			pref, size, cursor, ext := int32(-1), false, false, false
+			pref, size, cursor, ext, exact := int32(-1), false, false, false, false
 			list := make([]int32, 0, n)
 			for i := 0; i < n; i++ {
 				if _, err := io.ReadFull(br, b[:4]); err != nil {
@@ -312,6 +336,8 @@ func (c *Client) reader() error {
 					cursor = true
 				case encExtClip:
 					ext = true
+				case encExactKeys:
+					exact = true
 				}
 			}
 			if pref < 0 {
@@ -328,6 +354,9 @@ func (c *Client) reader() error {
 			c.mu.Unlock()
 			if newExt {
 				c.sendClipCaps()
+			}
+			if exact { // клієнт-агент просить уводити символи буквально
+				inputDo(func() { c.in.exact = true })
 			}
 			c.scr.refreshCursorMode()
 		case 3: // FramebufferUpdateRequest
@@ -356,14 +385,14 @@ func (c *Client) reader() error {
 				return err
 			}
 			sym, down := binary.BigEndian.Uint32(b[3:7]), b[0] != 0
-			inputDo(func() { c.in.key(sym, down) })
+			c.input(func() { c.in.key(sym, down) })
 			c.touch()
 		case 5: // PointerEvent
 			if _, err := io.ReadFull(br, b[:5]); err != nil {
 				return err
 			}
 			px, py, mask := int(binary.BigEndian.Uint16(b[1:3])), int(binary.BigEndian.Uint16(b[3:5])), b[0]
-			inputDo(func() { c.in.pointer(px, py, mask, int(c.scr.fbW.Load()), int(c.scr.fbH.Load())) })
+			c.input(func() { c.in.pointer(px, py, mask, int(c.scr.fbW.Load()), int(c.scr.fbH.Load())) })
 			c.touch()
 		case 6: // ClientCutText
 			if _, err := io.ReadFull(br, b[:7]); err != nil {
@@ -389,6 +418,13 @@ func (c *Client) reader() error {
 		default:
 			return fmt.Errorf("невідоме повідомлення клієнта: тип %d", typ)
 		}
+	}
+}
+
+// input виконує подію вводу від клієнта з урахуванням його обмежень.
+func (c *Client) input(f func()) {
+	if !c.noInput {
+		inputRun(f, c.agent)
 	}
 }
 

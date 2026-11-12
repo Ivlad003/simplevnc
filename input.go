@@ -21,6 +21,7 @@ type inputState struct {
 	buttons   byte
 	keys      map[uint32]keyDown
 	clientCyr bool // остання літера від клієнта була нелатинською: мову веде клієнт
+	exact     bool // уводити символи буквально (сеанс агента)
 	stats     keyStats
 }
 
@@ -153,7 +154,7 @@ func (st *inputState) resolve(sym uint32) (k keyDown, ok bool) {
 
 	// У Windows нелатинська розкладка, а клієнт шле латиницю: мову перемкнули на ПК.
 	// Натискаємо фізичну клавішу, і символ обирає Windows (докладніше — у keymap.go).
-	if !modHeld && r < 0x7f && !st.clientCyr {
+	if !modHeld && r < 0x7f && !st.clientCyr && !st.exact {
 		if _, _, latinLayout := vkForRune('a', hkl); !latinLayout {
 			if sk, ok := usScan[r]; ok {
 				st.stats.phys++

@@ -63,24 +63,47 @@ func (d *deskFollower) follow(before func()) bool {
 	return !first
 }
 
+// secure — потік зараз на захищеному робочому столі (UAC, екран входу).
+func (d *deskFollower) secure() bool {
+	return d.name != "" && d.name != "Default"
+}
+
 // Увесь ввід (миша, клавіатура) виконує один закріплений потік: SendInput діє на
 // робочий стіл потоку, який його викликає, тож цей потік стежить за столом вводу.
-var inputJobs = make(chan func(), 64)
+type inputJob struct {
+	f       func()
+	guarded bool // ввід від агента: на захищеному робочому столі не виконується
+	done    chan struct{}
+}
+
+var inputJobs = make(chan inputJob, 64)
 
 func inputLoop() {
 	runtime.LockOSThread()
 	var d deskFollower
+	var warned time.Time
 	for job := range inputJobs {
-		if time.Since(d.checked) > 100*time.Millisecond {
+		// для агента перевіряємо стіл перед кожною дією, щоб жодна не «проскочила»
+		if job.guarded || time.Since(d.checked) > 100*time.Millisecond {
 			d.follow(nil)
 		}
-		job()
+		if job.guarded && d.secure() {
+			if time.Since(warned) > 5*time.Second {
+				warned = time.Now()
+				logf("ввід агента заблоковано: на екрані вікно дозволу Windows або екран входу")
+			}
+		} else {
+			job.f()
+		}
+		close(job.done)
 	}
 }
 
-// inputDo виконує f у потоці вводу й чекає завершення (порядок подій зберігається).
-func inputDo(f func()) {
-	done := make(chan struct{})
-	inputJobs <- func() { f(); close(done) }
-	<-done
+// inputRun виконує f у потоці вводу й чекає завершення (порядок подій зберігається).
+func inputRun(f func(), guarded bool) {
+	job := inputJob{f: f, guarded: guarded, done: make(chan struct{})}
+	inputJobs <- job
+	<-job.done
 }
+
+func inputDo(f func()) { inputRun(f, false) }

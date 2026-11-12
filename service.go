@@ -36,6 +36,9 @@ type svcConfig struct {
 	Port     int    `json:"port"`
 	Scale    int    `json:"scale"`
 	Area     string `json:"area"`
+
+	AgentPassword string `json:"agentPassword,omitempty"`
+	AgentView     bool   `json:"agentView,omitempty"`
 }
 
 func dataDir() string {
@@ -275,6 +278,13 @@ func serviceCommand(install bool, c svcConfig, noPass, viaUAC bool) int {
 		fmt.Println("  Пароль:    немає (будь-хто в мережі може підключитися!)")
 	} else {
 		fmt.Println("  Пароль:   ", c.Password, " — запишіть, більше він ніде не показується")
+	}
+	if c.AgentPassword != "" && c.Password != "" {
+		mode := "керування без вікон дозволу Windows"
+		if c.AgentView {
+			mode = "лише перегляд"
+		}
+		fmt.Println("  Пароль для агентів:", c.AgentPassword, "—", mode)
 	}
 	fmt.Println("  Журнал:   ", logPath())
 	fmt.Println("Видалити службу: SimpleVNC.exe -uninstall")

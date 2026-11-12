@@ -17,6 +17,10 @@ import (
 
 const keyScancode = 0x0008 // KEYEVENTF_SCANCODE
 
+// encExactKeys — приватне псевдокодування: клієнт (міст для ШІ-агентів) просить
+// уводити саме ті символи, які надсилає, без підстановки «фізичних» клавіш.
+const encExactKeys = 0x53564E01
+
 type scanKey struct {
 	sc    uint16
 	shift bool
