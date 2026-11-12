@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleVNC — {{.Name}}</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #16181d; --muted: #5f6672;
+    --line: #dfe2e8; --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --warn: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #181b21; --text: #e8eaee; --muted: #9aa1ad;
+      --line: #2a2f38; --accent: #4c8dff; --accent-text: #0b0d11; --ok: #4ac26b; --warn: #ff7b72;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 32px 16px 56px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 8px; }
+  h1 { font-size: 28px; margin: 0; letter-spacing: -0.01em; }
+  .host { color: var(--muted); font-size: 18px; }
+  .status { display: flex; align-items: center; gap: 8px; color: var(--muted); margin-bottom: 28px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .status.on { color: var(--text); }
+  .status.on .dot { background: var(--ok); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 32px 0 12px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .label { color: var(--muted); font-size: 14px; margin-bottom: 14px; }
+  .qr { background: #fff; border-radius: 8px; padding: 6px; width: 196px; height: 196px; display: block; margin: 0 auto 16px; }
+  .qr img { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+  .mono { font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .addr { font-size: 20px; font-weight: 600; text-align: center; word-break: break-all; }
+  .row { display: flex; gap: 8px; justify-content: center; margin-top: 14px; flex-wrap: wrap; }
+  button, a.btn {
+    font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--text); text-decoration: none;
+  }
+  button:hover, a.btn:hover { border-color: var(--accent); }
+  button:focus-visible, a.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .pass { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .pass .value { font-size: 28px; font-weight: 600; letter-spacing: 0.06em; }
+  .warn { color: var(--warn); }
+  .seg { display: flex; flex-wrap: wrap; gap: 8px; }
+  .hint { color: var(--muted); font-size: 14px; margin: 12px 0 0; }
+  ol { margin: 0; padding-left: 20px; }
+  li { margin-bottom: 4px; }
+  .how h3 { font-size: 16px; margin: 0 0 8px; }
+  code { font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; font-size: 0.92em; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>SimpleVNC</h1>
+    <span class="host">{{.Name}}</span>
+  </header>
+  <div class="status" id="status"><span class="dot"></span><span id="statusText">Перевіряю…</span></div>
+
+  <h2>Адреси для підключення</h2>
+  <div class="grid">
+    {{range $i, $a := .Addrs}}
+    <div class="card">
+      <div class="label">{{$a.Label}}</div>
+      <div class="qr"><img src="/qr.png?i={{$i}}" alt="QR-код адреси {{$a.URL}}"></div>
+      <div class="addr mono">{{$a.Host}}</div>
+      <div class="row">
+        <button type="button" data-copy="{{$a.Host}}">Копіювати</button>
+        <a class="btn" href="{{$a.URL}}">Відкрити vnc://</a>
+      </div>
+    </div>
+    {{else}}
+    <div class="card"><span class="warn">Не знайдено жодної мережевої адреси. Перевірте підключення до мережі.</span></div>
+    {{end}}
+  </div>
+
+  <h2>Пароль</h2>
+  <div class="card pass">
+    {{if .Password}}
+    <span class="value mono">{{.Password}}</span>
+    <button type="button" data-copy="{{.Password}}">Копіювати</button>
+    {{else}}
+    <span class="warn">Пароль вимкнено — підключитися може будь-хто в мережі.</span>
+    {{end}}
+  </div>
+
+  <h2>Роздільність трансляції</h2>
+  <div class="card">
+    <div class="seg" id="seg">
+      {{range .Steps}}<button type="button" data-scale="{{.}}">{{.}}%</button>{{end}}
+    </div>
+    <p class="hint" id="frameInfo"></p>
+    <p class="hint">Менший кадр швидше передається повільною мережею й зручніший на телефоні. Картинка завжди без втрат якості. Після зміни клієнт може перепідключитися.</p>
+  </div>
+
+  <h2>Як підключитися</h2>
+  <div class="grid how">
+    <div class="card">
+      <h3>Mac</h3>
+      <ol>
+        <li>Finder → <code>Cmd+K</code>.</li>
+        <li>Введіть <code>vnc://адреса:{{.Port}}</code>.</li>
+        <li>Введіть пароль.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>iPhone, iPad, Android</h3>
+      <ol>
+        <li>Встановіть VNC-клієнт, наприклад RealVNC Viewer.</li>
+        <li>Наведіть камеру на QR-код або введіть адресу вручну.</li>
+        <li>Введіть пароль.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>Windows, Linux</h3>
+      <ol>
+        <li>Відкрийте будь-який VNC-клієнт (TigerVNC, UltraVNC, Remmina).</li>
+        <li>Адреса — <code>адреса:{{.Port}}</code>.</li>
+        <li>Введіть пароль.</li>
+      </ol>
+    </div>
+  </div>
+  <p class="hint">Ця сторінка відкривається лише на цьому комп'ютері. Щоб зупинити сервер, закрийте вікно SimpleVNC.</p>
+</main>
+<script>
+  document.querySelectorAll('[data-copy]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      navigator.clipboard.writeText(b.dataset.copy).then(function () {
+        var old = b.textContent;
+        b.textContent = 'Скопійовано';
+        setTimeout(function () { b.textContent = old; }, 1200);
+      });
+    });
+  });
+  function refresh() {
+    fetch('/api/status').then(function (r) { return r.json(); }).then(function (s) {
+      var st = document.getElementById('status');
+      var ips = s.clients.map(function (c) { return c.replace(/:\d+$/, ''); });
+      st.classList.toggle('on', ips.length > 0);
+      document.getElementById('statusText').textContent =
+        ips.length ? 'Підключено: ' + ips.join(', ') : 'Ніхто не підключений';
+      document.querySelectorAll('[data-scale]').forEach(function (b) {
+        b.classList.toggle('active', Number(b.dataset.scale) === s.scale);
+      });
+      document.getElementById('frameInfo').textContent =
+        'Екран ' + s.screen + ' → клієнт отримує ' + s.frame + '.';
+    }).catch(function () {
+      document.getElementById('status').classList.remove('on');
+      document.getElementById('statusText').textContent = 'Сервер зупинено';
+    });
+  }
+  document.querySelectorAll('[data-scale]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      fetch('/api/scale?v=' + b.dataset.scale, { method: 'POST' }).then(refresh);
+    });
+  });
+  refresh();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>
