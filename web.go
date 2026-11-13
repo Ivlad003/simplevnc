@@ -211,6 +211,7 @@ func (u *webUI) render(w http.ResponseWriter, remote bool) {
 		"Port":     u.port,
 		"Web":      u.webPort != 0,
 		"Steps":    scaleSteps,
+		"Version":  version,
 	})
 }
 
@@ -267,6 +268,7 @@ func (u *webUI) status(w http.ResponseWriter, r *http.Request) {
 		"areas":   areaChoices(),
 		"display": u.srv.disp.status(),
 		"boot":    bootID,
+		"version": version,
 	})
 }
 

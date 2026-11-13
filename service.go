@@ -314,7 +314,7 @@ func serviceCommand(install bool, c svcConfig, noPass, viaUAC bool, given map[st
 	if updating {
 		fmt.Println("Службу SimpleVNC оновлено. Налаштування, яких ви не задавали, лишилися як були.")
 	}
-	fmt.Println("Службу SimpleVNC встановлено й запущено. Вона стартує разом із Windows,")
+	fmt.Println("Службу SimpleVNC", version, "встановлено й запущено. Вона стартує разом із Windows,")
 	fmt.Println("показує вікна дозволу (UAC) та екран входу.")
 	fmt.Println("  Програма: ", exe)
 	fmt.Println("  Порт:     ", c.Port)

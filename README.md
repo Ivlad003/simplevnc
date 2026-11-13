@@ -3,6 +3,30 @@
 Мінімальний VNC-сервер для Windows: один файл, без встановлення й налаштувань.
 Запустив — і підключайся з Mac, iPhone, iPad, Linux чи іншого Windows.
 
+Сторінка проєкту: <https://ivlad003.github.io/simplevnc/>
+
+## Встановлення однією командою
+
+У PowerShell на комп'ютері з Windows:
+
+```powershell
+irm https://ivlad003.github.io/simplevnc/install.ps1 | iex
+```
+
+Команда завантажує останню версію, перевіряє контрольну суму й встановлює SimpleVNC як
+службу Windows (Windows один раз попросить підтвердження). **Щоб оновитися, виконайте ту
+саму команду ще раз:** служба перезапуститься вже на новій версії, а пароль, порт
+і налаштування лишаться.
+
+| Що потрібно | Команда |
+|---|---|
+| Свій пароль під час встановлення | `$env:SIMPLEVNC_ARGS = '-p secret12'; irm https://ivlad003.github.io/simplevnc/install.ps1 \| iex` |
+| Лише запустити, без служби | `$env:SIMPLEVNC_RUN = 1; irm https://ivlad003.github.io/simplevnc/install.ps1 \| iex` |
+| Видалити службу | `& "$env:ProgramFiles\SimpleVNC\SimpleVNC.exe" -uninstall` |
+
+Або завантажте [SimpleVNC.exe](https://github.com/Ivlad003/simplevnc/releases/latest/download/SimpleVNC.exe)
+і просто запустіть його.
+
 ## Швидкий старт
 
 1. Запустіть `SimpleVNC.exe`.
@@ -159,6 +183,7 @@ claude mcp add --env SIMPLEVNC_HOST=адреса:порт --env SIMPLEVNC_PASSWO
 | `-noopen` | Не відкривати сторінку підключення в браузері. |
 | `-nobonjour` | Не оголошувати ПК у локальній мережі. |
 | `-install`, `-uninstall` | Встановити або видалити службу Windows. |
+| `-version` | Показати версію програми. |
 | `-agentpass пароль` | Окремий пароль для ШІ-агентів, без доступу до вікон дозволу Windows. |
 | `-agentview` | Агенти з паролем `-agentpass` лише дивляться. |
 | `-clipdir тека` | Куди зберігати файли зі спільного буфера. Типово — «Завантаження\SimpleVNC». |
@@ -203,6 +228,9 @@ claude mcp add --env SIMPLEVNC_HOST=адреса:порт --env SIMPLEVNC_PASSWO
 | `webclient.go`, `novnc/` | Веб-клієнт і міст WebSocket. |
 | `bonjour.go` | Оголошення ПК у локальній мережі. |
 | `service.go` | Служба Windows: встановлення, автозапуск, робочий процес. |
+| `settings.go` | Збереження налаштувань зі сторінки та перезапуск сервера. |
+| `listen.go` | Відкриття портів окремо для IPv4 та IPv6. |
+| `docs/` | Сторінка проєкту й сценарій встановлення `install.ps1` (GitHub Pages). |
 | `keymap.go` | Фізичні клавіші для перемикання мови, лічильники клавіш. |
 | `cmd/simplevnc-mcp/` | Міст для ШІ-агентів: VNC-клієнт і сервер MCP. Збирається під будь-яку ОС. |
 | `win.go` | Виклики Win32. |
@@ -212,8 +240,12 @@ claude mcp add --env SIMPLEVNC_HOST=адреса:порт --env SIMPLEVNC_PASSWO
 Потрібен Go 1.21 або новіший, лише Windows.
 
 ```
-go build -trimpath -ldflags "-s -w" -o SimpleVNC.exe .
+go build -trimpath -ldflags "-s -w -X main.version=v0.1.0" -o SimpleVNC.exe .
 ```
+
+Номер версії показують `SimpleVNC.exe -version` і сторінка підключення. Сторінка проєкту
+та сценарій встановлення лежать у `docs/` (GitHub Pages); сценарій бере файли
+`SimpleVNC.exe` і `SHA256SUMS.txt` з останнього релізу на GitHub.
 
 Міст для агентів, наприклад під Mac з процесором Apple:
 

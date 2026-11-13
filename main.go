@@ -16,6 +16,9 @@ import (
 
 var verbose, noDXGI bool
 
+// version задається під час збірки: -ldflags "-X main.version=v0.1.0".
+var version = "dev"
+
 func logf(format string, a ...any) {
 	stamp := "15:04:05"
 	if serviceMode {
@@ -71,9 +74,14 @@ func main() {
 	service := flag.Bool("service", false, "(внутрішнє) запуск диспетчером служб")
 	worker := flag.Bool("worker", false, "(внутрішнє) робочий процес служби")
 	elevated := flag.Bool("elevated", false, "(внутрішнє) перезапуск через UAC")
+	showVersion := flag.Bool("version", false, "показати версію програми")
 	flag.Parse()
 
 	pSetConsoleOutputCP.Call(65001)
+	if *showVersion {
+		fmt.Println("SimpleVNC", version)
+		return
+	}
 
 	given := map[string]bool{} // параметри, задані явно
 	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
@@ -201,9 +209,9 @@ func runServer(o options) {
 
 	_, _, areaW, areaH := captureArea()
 	if serviceMode {
-		logf("робочий процес служби: порт %d, кадр %dx%d", o.port, areaW, areaH)
+		logf("робочий процес служби %s: порт %d, кадр %dx%d", version, o.port, areaW, areaH)
 	} else {
-		fmt.Println("SimpleVNC запущено")
+		fmt.Println("SimpleVNC", version, "запущено")
 		fmt.Printf("  Екран:   %dx%d", areaW, areaH)
 		if sc := int(scr.scale.Load()); sc != 100 {
 			fmt.Printf(" (трансляція %d%%)", sc)
