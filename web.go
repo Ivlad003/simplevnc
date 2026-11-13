@@ -136,6 +136,8 @@ func (u *webUI) mountRemote(mux *http.ServeMux, hub *clipHub) {
 	mux.HandleFunc("/panel/api/status", hub.guard(u.status))
 	mux.HandleFunc("/panel/api/scale", hub.guard(u.setScale))
 	mux.HandleFunc("/panel/api/area", hub.guard(u.setArea))
+	mux.HandleFunc("/panel/api/display", hub.guard(u.setDisplay))
+	mux.HandleFunc("/panel/api/restart", hub.guard(u.restart))
 }
 
 // startWeb піднімає сторінку підключення лише на 127.0.0.1: її бачить той, хто
@@ -158,6 +160,8 @@ func startWeb(srv *Server, port int, bind string, webPort int) (*webUI, error) {
 	mux.HandleFunc("/api/status", u.guard(u.status))
 	mux.HandleFunc("/api/scale", u.guard(u.setScale))
 	mux.HandleFunc("/api/area", u.guard(u.setArea))
+	mux.HandleFunc("/api/display", u.guard(u.setDisplay))
+	mux.HandleFunc("/api/restart", u.guard(u.restart))
 	go http.Serve(ln, mux)
 	return u, nil
 }
@@ -261,7 +265,25 @@ func (u *webUI) status(w http.ResponseWriter, r *http.Request) {
 		"frame":   fmt.Sprintf("%d×%d", fw, fh),
 		"area":    areaID(),
 		"areas":   areaChoices(),
+		"display": u.srv.disp.status(),
+		"boot":    bootID,
 	})
+}
+
+// setDisplay обирає роздільність екрана ПК на час підключення; v=native — не міняти.
+func (u *webUI) setDisplay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.URL.Query().Get("v")
+	if err := u.srv.disp.set(id); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	logf("роздільність екрана на час підключення: %s", id)
+	u.srv.saveSettings()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (u *webUI) setScale(w http.ResponseWriter, r *http.Request) {
@@ -275,6 +297,7 @@ func (u *webUI) setScale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logf("масштаб кадру змінено на %d%%", v)
+	u.srv.saveSettings()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -289,5 +312,6 @@ func (u *webUI) setArea(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logf("область трансляції змінено на %s", id)
+	u.srv.saveSettings()
 	w.WriteHeader(http.StatusNoContent)
 }

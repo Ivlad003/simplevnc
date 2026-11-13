@@ -48,6 +48,12 @@
   button:hover, a.btn:hover { border-color: var(--accent); }
   button:focus-visible, a.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  select {
+    font: inherit; font-size: 14px; padding: 7px 10px; border-radius: 8px; max-width: 100%;
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+  }
+  select:hover { border-color: var(--accent); }
+  select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .pass { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
   .pass .value { font-size: 28px; font-weight: 600; letter-spacing: 0.06em; }
   .warn { color: var(--warn); }
@@ -138,12 +144,30 @@
   <div class="card">
     <div class="sub">Область екрана</div>
     <div class="seg" id="areas"></div>
-    <div class="sub">Роздільність</div>
+    <div class="sub">Розмір кадру</div>
     <div class="seg" id="seg">
       {{range .Steps}}<button type="button" data-scale="{{.}}">{{.}}%</button>{{end}}
     </div>
     <p class="hint" id="frameInfo"></p>
     <p class="hint">Менший кадр швидше передається повільною мережею й зручніший на телефоні. Картинка завжди без втрат якості. Після зміни клієнт може перепідключитися.</p>
+  </div>
+
+  <h2>Екран ПК під час підключення</h2>
+  <div class="card">
+    <div class="seg">
+      <select id="display" aria-label="Роздільність екрана ПК під час підключення"></select>
+      <button type="button" id="displayFit">Підібрати під цей пристрій</button>
+    </div>
+    <p class="hint" id="displayInfo"></p>
+    <p class="hint">Якщо монітор ПК має інші пропорції, ніж ваш пристрій, картинка виходить вузькою смужкою. Оберіть роздільність із пропорціями свого екрана: поки хтось підключений, ПК працюватиме в ній і зображення заповнить ваш екран. Через хвилину після відключення повертається звичайна роздільність. Під час перемикання вікна на ПК можуть зміститися.</p>
+  </div>
+
+  <h2>Сервер</h2>
+  <div class="card">
+    <div class="seg">
+      <button type="button" id="restart">Перезапустити сервер</button>
+    </div>
+    <p class="hint" id="restartInfo">Налаштування з цієї сторінки зберігаються й діють після перезапуску та перезавантаження ПК. Перезапуск триває кілька секунд: підключення розірвуться, клієнти зможуть підключитися знову з тим самим паролем.{{if .Service}} На нову версію програми службу переводить команда встановлення.{{end}}</p>
   </div>
 
   <h2>Підказки</h2>
@@ -185,8 +209,55 @@
       });
     });
   });
-  var areasKey = '';
+  var bootId = '';
+  var areasKey = '', displayKey = '', displayModes = [], displayNative = '', displayErr = '', displayErrUntil = 0;
   function post(path) { return fetch(path, { method: 'POST' }).then(refresh); }
+  function setDisplay(id) {
+    fetch('api/display?v=' + encodeURIComponent(id), { method: 'POST' }).then(function (r) {
+      if (r.ok) { displayErr = ''; return; }
+      return r.text().then(function (t) { // показуємо причину кілька секунд
+        displayErr = t.trim();
+        displayErrUntil = Date.now() + 8000;
+      });
+    }).then(refresh);
+  }
+  function showDisplay(d) {
+    var sel = document.getElementById('display');
+    var key = JSON.stringify([d.modes, d.native]);
+    if (key !== displayKey) { // список режимів змінився (наприклад, інший монітор)
+      displayKey = key;
+      displayModes = d.modes;
+      displayNative = d.native;
+      sel.textContent = '';
+      var keep = document.createElement('option');
+      keep.value = 'native';
+      keep.textContent = 'Не змінювати';
+      sel.appendChild(keep);
+      var groups = {}, other = 'Інші пропорції';
+      d.modes.forEach(function (m) {
+        if (m.id === d.native) return; // звичайний режим — це «Не змінювати»
+        var name = m.ratio || other;
+        if (!groups[name]) {
+          groups[name] = document.createElement('optgroup');
+          groups[name].label = name;
+          if (name !== other) sel.appendChild(groups[name]);
+        }
+        var o = document.createElement('option');
+        o.value = m.id;
+        o.textContent = m.w + '×' + m.h;
+        groups[name].appendChild(o);
+      });
+      if (groups[other]) sel.appendChild(groups[other]); // нестандартні — в кінці списку
+    }
+    if (document.activeElement !== sel) sel.value = d.want && d.want !== d.native ? d.want : 'native';
+    var text = 'Зараз на ПК: ' + (d.current || 'невідомо') + '.';
+    if (d.want && d.want !== d.native && !d.applied) text += ' Обрану роздільність буде ввімкнено, щойно хтось підключиться.';
+    if (!d.want && d.applied) text += ' Звичайна роздільність повернеться після відключення.';
+    if (displayErr && Date.now() < displayErrUntil) text = displayErr;
+    var info = document.getElementById('displayInfo');
+    info.textContent = text;
+    info.classList.toggle('warn', Boolean(displayErr) && Date.now() < displayErrUntil);
+  }
   function refresh() {
     fetch('api/status').then(function (r) { return r.json(); }).then(function (s) {
       var st = document.getElementById('status');
@@ -216,6 +287,8 @@
       });
       document.getElementById('frameInfo').textContent =
         'Область ' + s.screen + ' → клієнт отримує ' + s.frame + '.';
+      if (s.display) showDisplay(s.display);
+      bootId = s.boot || bootId;
     }).catch(function () {
       document.getElementById('status').classList.remove('on');
       document.getElementById('statusText').textContent = 'Сервер зупинено';
@@ -223,6 +296,54 @@
   }
   document.querySelectorAll('[data-scale]').forEach(function (b) {
     b.addEventListener('click', function () { post('api/scale?v=' + b.dataset.scale); });
+  });
+  document.getElementById('display').addEventListener('change', function () { setDisplay(this.value); this.blur(); });
+  // pickMode добирає режим ПК під екран пристрою: w×h у точках CSS, dpr — щільність.
+  function pickMode(modes, w, h, dpr) {
+    // пропорції пристрою в альбомному положенні та його ширина у справжніх пікселях
+    var long = Math.max(w, h), short = Math.min(w, h);
+    var ratio = long / short, px = long * (dpr || 1);
+    function off(m) { return Math.abs(Math.log(m.w / m.h / ratio)); }
+    var best = Infinity;
+    modes.forEach(function (m) { best = Math.min(best, off(m)); });
+    var close = modes.filter(function (m) { return off(m) <= best + 0.03; });
+    if (!close.length) return null;
+    // серед найближчих за пропорціями — найбільший, що не ширший за цей екран; інакше найменший
+    var fits = close.filter(function (m) { return m.w <= Math.max(px, 1280); });
+    return fits.length ? fits[0] : close[close.length - 1];
+  }
+  document.getElementById('displayFit').addEventListener('click', function () {
+    var pick = pickMode(displayModes, screen.width, screen.height, window.devicePixelRatio);
+    if (pick) setDisplay(pick.id === displayNative ? 'native' : pick.id);
+  });
+  document.getElementById('restart').addEventListener('click', function () {
+    if (!confirm('Перезапустити сервер? Усі підключення розірвуться на кілька секунд.')) return;
+    var button = this, info = document.getElementById('restartInfo'), before = bootId;
+    button.disabled = true;
+    fetch('api/restart', { method: 'POST' }).then(function (r) {
+      if (!r.ok) throw new Error('refused');
+      info.textContent = 'Перезапускаю…';
+      var tries = 0;
+      var timer = setInterval(function () { // чекаємо, доки відповість уже новий процес
+        fetch('api/status', { cache: 'no-store' }).then(function (r) {
+          if (r.status === 401) return { boot: 'login' }; // після перезапуску треба ввійти знову
+          return r.ok ? r.json() : null;
+        }).then(function (s) {
+          if (s && s.boot && s.boot !== before) {
+            clearInterval(timer);
+            location.reload();
+          }
+        }).catch(function () {});
+        if (++tries > 45) {
+          clearInterval(timer);
+          info.textContent = 'Сервер не відповідає. Оновіть сторінку трохи згодом.';
+          button.disabled = false;
+        }
+      }, 1000);
+    }).catch(function () {
+      info.textContent = 'Не вдалося перезапустити сервер.';
+      button.disabled = false;
+    });
   });
   refresh();
   setInterval(refresh, 2000);

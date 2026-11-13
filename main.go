@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -41,6 +43,7 @@ type options struct {
 	password string
 	scale    int
 	area     string
+	mode     string // роздільність екрана ПК на час підключення, «1920x1200»
 	noOpen   bool
 	bonjour  bool
 	agentPw  string
@@ -57,6 +60,7 @@ func main() {
 	scale := flag.Int("scale", 100, "розмір кадру у відсотках: 100, 75, 66, 50, 33 або 25")
 	noOpen := flag.Bool("noopen", false, "не відкривати сторінку підключення в браузері")
 	area := flag.String("area", "all", "що транслювати: all, left, right, m1, m2… або x,y,ширина,висота")
+	mode := flag.String("mode", "", "роздільність екрана ПК, поки хтось підключений, наприклад 1920x1200; після відключення повертається звичайна")
 	flag.BoolVar(&forceDrawnCurs, "drawcursor", false, "завжди малювати курсор у кадрі (видно рухи миші за самим ПК)")
 	agentPass := flag.String("agentpass", "", "окремий пароль для ШІ-агентів (до 8 символів): без доступу до вікон дозволу Windows")
 	agentView := flag.Bool("agentview", false, "агенти з паролем -agentpass лише дивляться, без миші та клавіатури")
@@ -74,6 +78,20 @@ func main() {
 	given := map[string]bool{} // параметри, задані явно
 	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	explicitPort := given["port"]
+
+	restarted, inheritedPass := afterRestart()
+	if !*service && !*worker && !*install && !*uninstall { // звичайний запуск: беремо збережене зі сторінки
+		saved := loadSettings()
+		if !given["scale"] && validScale(saved.Scale) {
+			*scale = saved.Scale
+		}
+		if !given["area"] && saved.Area != "" {
+			*area = saved.Area
+		}
+		if !given["mode"] && saved.Mode != "" {
+			*mode = saved.Mode
+		}
+	}
 
 	password := *pass
 	if len(password) > 8 {
@@ -94,7 +112,7 @@ func main() {
 		runService()
 		return
 	case *install || *uninstall:
-		c := svcConfig{Password: password, Scale: *scale, Area: *area, AgentPassword: *agentPass, AgentView: *agentView}
+		c := svcConfig{Password: password, Scale: *scale, Area: *area, Mode: *mode, AgentPassword: *agentPass, AgentView: *agentView}
 		if explicitPort {
 			c.Port = *port
 		}
@@ -102,7 +120,7 @@ func main() {
 	}
 
 	o := options{port: *port, portAuto: !explicitPort, bind: *bind, password: password,
-		scale: *scale, area: *area, noOpen: *noOpen, bonjour: !*noBonjour, agentPw: *agentPass, agentRO: *agentView}
+		scale: *scale, area: *area, mode: *mode, noOpen: *noOpen, bonjour: !*noBonjour, agentPw: *agentPass, agentRO: *agentView}
 	if *worker {
 		serviceMode = true
 		setupFileLog()
@@ -111,15 +129,18 @@ func main() {
 			logf("не вдалося прочитати налаштування служби: %v", err)
 			os.Exit(1)
 		}
-		o = options{port: c.Port, portAuto: true, password: c.Password, scale: c.Scale, area: c.Area,
+		o = options{port: c.Port, portAuto: true, password: c.Password, scale: c.Scale, area: c.Area, mode: c.Mode,
 			noOpen: true, bonjour: true, agentPw: c.AgentPassword, agentRO: c.AgentView}
 	} else {
 		switch {
 		case *nopass:
 			o.password = ""
+		case o.password == "" && restarted && inheritedPass != "":
+			o.password = inheritedPass // перезапуск зі сторінки: пароль лишається тим самим
 		case o.password == "":
 			o.password = randomPassword()
 		}
+		o.noOpen = o.noOpen || restarted // сторінка вже відкрита
 	}
 	runServer(o)
 }
@@ -136,7 +157,7 @@ func runServer(o options) {
 	var ln net.Listener
 	var err error
 	for p := o.port; p <= last; p++ {
-		if ln, err = net.Listen("tcp", net.JoinHostPort(o.bind, fmt.Sprint(p))); err == nil {
+		if ln, err = listenTCP(o.bind, p); err == nil {
 			o.port = p
 			break
 		}
@@ -161,6 +182,14 @@ func runServer(o options) {
 	if o.password == "" {
 		srv.agentPassword = "" // без основного пароля окремий пароль агента не має сенсу
 	}
+	srv.disp = newDisplayCtl(scr, o.mode)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM) // Ctrl+C або закрили вікно
+	go func() {
+		<-stop
+		srv.disp.shutdown() // повертаємо екрану звичайну роздільність
+		os.Exit(0)
+	}()
 	go inputLoop()
 	go scr.run()
 	go scr.watchClipboard()

@@ -22,6 +22,7 @@ type areaRect struct{ x, y, w, h int }
 type monitor struct {
 	areaRect
 	primary bool
+	device  [32]uint16 // назва дисплея у Windows — щоб міняти його роздільність
 }
 
 var (
@@ -35,10 +36,12 @@ var (
 	monEnum  = syscall.NewCallback(monitorEnumProc) // зворотний виклик створюємо один раз
 )
 
+// monitorInfo — MONITORINFOEXW.
 type monitorInfo struct {
 	size      uint32
 	mon, work [4]int32
 	flags     uint32
+	device    [32]uint16
 }
 
 func monitorEnumProc(hMon, hdc, rc, data uintptr) uintptr {
@@ -47,6 +50,7 @@ func monitorEnumProc(hMon, hdc, rc, data uintptr) uintptr {
 		monFound = append(monFound, monitor{
 			areaRect: areaRect{int(mi.mon[0]), int(mi.mon[1]), int(mi.mon[2] - mi.mon[0]), int(mi.mon[3] - mi.mon[1])},
 			primary:  mi.flags&1 != 0,
+			device:   mi.device,
 		})
 	}
 	return 1

@@ -146,7 +146,7 @@ func startWebClient(srv *Server, bind string) (int, *http.ServeMux, *clipHub, er
 	var err error
 	port := 0
 	for p := 6080; p < 6180; p++ { // 6080 — звичний порт noVNC
-		if ln, err = net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(p))); err == nil {
+		if ln, err = listenTCP(bind, p); err == nil {
 			port = p
 			break
 		}

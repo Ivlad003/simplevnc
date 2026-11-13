@@ -21,7 +21,8 @@ import (
 
 type Server struct {
 	scr      *Screen
-	password string // порожній — без пароля
+	disp     *displayCtl // роздільність екрана ПК на час підключення
+	password string      // порожній — без пароля
 	name     string
 
 	// Окремий пароль для ШІ-агентів. Сеанс із ним обмежений: не може нічого

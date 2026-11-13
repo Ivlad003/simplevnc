@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +35,7 @@ type svcConfig struct {
 	Port     int    `json:"port"`
 	Scale    int    `json:"scale"`
 	Area     string `json:"area"`
+	Mode     string `json:"mode,omitempty"` // роздільність екрана на час підключення
 
 	AgentPassword string `json:"agentPassword,omitempty"`
 	AgentView     bool   `json:"agentView,omitempty"`
@@ -61,25 +61,39 @@ func installDir() string {
 
 // saveConfig пише налаштування служби у файл, доступний лише SYSTEM та
 // адміністраторам: там лежить пароль, а доступ до VNC — це доступ до консолі.
+//
+// Пишемо в сусідній файл і підміняємо ним старий: робочий процес служби оновлює
+// налаштування на ходу, і збій посеред запису не має лишити службу без них.
 func saveConfig(c svcConfig) error {
 	if err := os.MkdirAll(dataDir(), 0755); err != nil {
 		return err
 	}
-	os.Remove(configPath()) // права задаються лише під час створення файла
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
+	tmp := configPath() + ".tmp"
+	os.Remove(tmp) // права задаються лише під час створення файла
+	sd, err := windows.SecurityDescriptorFromString(configSDDL)
 	if err != nil {
 		return err
 	}
 	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
-	p, _ := windows.UTF16PtrFromString(configPath())
+	p, _ := windows.UTF16PtrFromString(tmp)
 	h, err := windows.CreateFile(p, windows.GENERIC_WRITE, 0, &sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
 		return err
 	}
-	f := os.NewFile(uintptr(h), configPath())
-	defer f.Close()
-	return json.NewEncoder(f).Encode(c)
+	f := os.NewFile(uintptr(h), tmp)
+	err = json.NewEncoder(f).Encode(c)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, configPath())
 }
+
+// configSDDL — права на файл налаштувань: лише SYSTEM та адміністратори.
+var configSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
 
 func loadConfig() (c svcConfig, err error) {
 	b, err := os.ReadFile(configPath())
@@ -223,6 +237,7 @@ func uninstallService() error {
 		return fmt.Errorf("службу не встановлено")
 	}
 	stopAndDelete(s)
+	restoreLeftoverMode() // службу зупинено примусово — звичайну роздільність повертаємо самі
 	firewallRule("", false)
 	os.Remove(configPath())
 	time.Sleep(500 * time.Millisecond)
@@ -273,6 +288,9 @@ func serviceCommand(install bool, c svcConfig, noPass, viaUAC bool, given map[st
 		if !given["area"] && old.Area != "" {
 			c.Area = old.Area
 		}
+		if !given["mode"] {
+			c.Mode = old.Mode
+		}
 		if !given["port"] && old.Port != 0 {
 			c.Port, keepPort = old.Port, true // порт зараз зайнятий самою службою — це нормально
 		}
@@ -318,7 +336,7 @@ func serviceCommand(install bool, c svcConfig, noPass, viaUAC bool, given map[st
 }
 
 func portFree(p int) bool {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
+	ln, err := listenTCP("", p)
 	if err != nil {
 		return false
 	}

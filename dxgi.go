@@ -115,6 +115,9 @@ func newDxgiCap() *dxgiCap {
 	}
 	c := &dxgiCap{gdiCap: g, created: time.Now()}
 	if !c.init() || len(c.outs) == 0 {
+		if verbose {
+			logf("DXGI: не вдалося почати захоплення (виходів: %d)", len(c.outs))
+		}
 		c.close()
 		return nil
 	}
@@ -187,6 +190,9 @@ func (c *dxgiCap) addAdapter(adapter uintptr) bool {
 		hr = comCall(out1, 22, dev, uintptr(unsafe.Pointer(&dup))) // DuplicateOutput
 		release(out1)
 		if failed(hr) || dup == 0 {
+			if verbose {
+				logf("DXGI: DuplicateOutput повернув %#x", uint32(hr))
+			}
 			release(dev)
 			release(ctx)
 			return false
@@ -256,6 +262,9 @@ func (c *dxgiCap) grab(wait time.Duration) (changed, ok bool) {
 		if !c.outs[i].have { // ще не всі монітори віддали перше зображення
 			if time.Since(c.created) > 1500*time.Millisecond {
 				dxgiBadUntil = time.Now().Add(time.Minute)
+				if verbose {
+					logf("DXGI: за 1,5 с не віддав зображення — хвилину працюю через GDI")
+				}
 				return false, false // переходимо на GDI
 			}
 			time.Sleep(5 * time.Millisecond)

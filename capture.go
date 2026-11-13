@@ -130,6 +130,8 @@ type Screen struct {
 
 	scale atomic.Int32 // масштаб для клієнтів, які не просили свого (звичайні VNC-клієнти)
 
+	onClients func() // хтось підключився або відключився
+
 	wake      chan struct{}
 	stale     atomic.Bool  // є клієнт, що ще не бачив свіжого захоплення
 	lastInput atomic.Int64 // UnixNano останньої події вводу
@@ -217,6 +219,13 @@ func (s *Screen) add(c *Client, scale int) {
 	s.stale.Store(true)
 	s.refreshCursorMode()
 	s.poke()
+	s.clientsChanged()
+}
+
+func (s *Screen) clientsChanged() {
+	if s.onClients != nil {
+		go s.onClients() // не затримуємо клієнта: перемикання екрана триває помітний час
+	}
 }
 
 func (s *Screen) remove(c *Client) {
@@ -229,6 +238,7 @@ func (s *Screen) remove(c *Client) {
 	}
 	s.mu.Unlock()
 	s.refreshCursorMode()
+	s.clientsChanged()
 }
 
 // allClients — усі підключені клієнти.
@@ -296,6 +306,7 @@ func (s *Screen) run() {
 	var kind string
 	var retryDX time.Time
 	retryEvery := 10 * time.Second
+	var geomAt time.Time // коли востаннє змінилася геометрія чи режим екрана
 	idleSince := time.Now()
 	var statFrames int
 	var statGrab, statDiff time.Duration
@@ -328,6 +339,7 @@ func (s *Screen) run() {
 		if cap != nil {
 			if cx, cy, cw, ch := cap.geom(); cx != vx || cy != vy || cw != w || ch != h {
 				drop()
+				geomAt = start
 			}
 		}
 		if cap != nil && !cap.fast() && !noDXGI && start.After(retryDX) {
@@ -341,6 +353,8 @@ func (s *Screen) run() {
 			k := "GDI"
 			if cap.fast() {
 				k, retryEvery = "DXGI", 10*time.Second
+			} else if start.Sub(geomAt) < 5*time.Second {
+				retryEvery = time.Second // режим щойно змінився: DXGI ще оговтується, пробуємо невдовзі
 			} else if retryEvery < 5*time.Minute {
 				retryEvery *= 2 // DXGI недоступний — пробуємо дедалі рідше
 			}
@@ -356,6 +370,7 @@ func (s *Screen) run() {
 		if !ok {
 			// робочий стіл недоступний (UAC, екран блокування, зміна режиму)
 			drop()
+			geomAt = start
 			if !desk.follow(nil) {
 				time.Sleep(200 * time.Millisecond)
 			}
