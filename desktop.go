@@ -81,7 +81,8 @@ var inputJobs = make(chan inputJob, 64)
 func inputLoop() {
 	runtime.LockOSThread()
 	var d deskFollower
-	var warned time.Time
+	var warned, failLogged time.Time
+	failed := 0
 	for job := range inputJobs {
 		// для агента перевіряємо стіл перед кожною дією, щоб жодна не «проскочила»
 		if job.guarded || time.Since(d.checked) > 100*time.Millisecond {
@@ -95,7 +96,36 @@ func inputLoop() {
 		} else {
 			job.f()
 		}
+		if inputFail.n > 0 {
+			// Найчастіша причина — робочий стіл вводу щойно змінився (вікно дозволу
+			// Windows, екран входу): перед наступною подією перевіримо його знову.
+			failed += inputFail.n
+			inputFail.n = 0
+			d.checked = time.Time{}
+		}
+		if failed > 0 && time.Since(failLogged) > 10*time.Second {
+			logf("ввід: Windows не прийняв подій: %d (помилка %d)", failed, uint32(inputFail.err))
+			failed, failLogged = 0, time.Now()
+		}
 		close(job.done)
+	}
+}
+
+// releaseAllInput відпускає клавіші й кнопки миші, які тримають клієнти. Викликається
+// перед завершенням процесу: інакше Windows і далі вважав би їх натиснутими.
+func releaseAllInput() {
+	job := inputJob{done: make(chan struct{}), f: func() {
+		for st := range activeInputs {
+			st.releaseAll()
+		}
+	}}
+	select {
+	case inputJobs <- job:
+		select {
+		case <-job.done:
+		case <-time.After(time.Second):
+		}
+	case <-time.After(time.Second):
 	}
 }
 

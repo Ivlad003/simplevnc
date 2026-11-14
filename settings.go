@@ -83,6 +83,7 @@ var bootID = strconv.FormatInt(time.Now().UnixNano(), 36)
 
 func (s *Server) restart() {
 	logf("перезапуск зі сторінки підключення")
+	releaseAllInput()
 	s.disp.shutdown() // екрану — звичайну роздільність; після підключення вона ввімкнеться знову
 	if !serviceMode {
 		exe, err := os.Executable()

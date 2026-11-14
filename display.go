@@ -115,6 +115,28 @@ func displayDevice() *[32]uint16 {
 	return &d
 }
 
+var pEnumDisplayDevicesW = user32.NewProc("EnumDisplayDevicesW")
+
+// monitorActive — чи до цього виходу відеокарти зараз під'єднано ввімкнений монітор.
+// Коли монітор вимкнено чи від'єднано, Windows лишає робочому столу його розмір, але
+// кадрів на екран не виводить.
+func monitorActive(dev *[32]uint16) bool {
+	if dev == nil {
+		return true // пристрій невідомий — не вгадуємо
+	}
+	var dd struct {
+		cb    uint32
+		name  [32]uint16
+		str   [128]uint16
+		flags uint32
+		id    [128]uint16
+		key   [128]uint16
+	}
+	dd.cb = uint32(unsafe.Sizeof(dd))
+	r, _, _ := pEnumDisplayDevicesW.Call(uintptr(unsafe.Pointer(&dev[0])), 0, uintptr(unsafe.Pointer(&dd)), 0)
+	return r != 0 && dd.flags&1 != 0 // DISPLAY_DEVICE_ACTIVE
+}
+
 func enumSettings(dev *[32]uint16, n uint32, dm *devMode) bool {
 	var d unsafe.Pointer
 	if dev != nil {

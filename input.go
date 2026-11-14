@@ -3,6 +3,8 @@
 package main
 
 import (
+	"strings"
+	"time"
 	"unicode"
 	"unsafe"
 )
@@ -232,6 +234,7 @@ func emit(k keyDown, down bool) {
 }
 
 func (st *inputState) key(sym uint32, down bool) {
+	activeInputs[st] = struct{}{}
 	if st.keys == nil {
 		st.keys = map[uint32]keyDown{}
 	}
@@ -253,9 +256,65 @@ func (st *inputState) key(sym uint32, down bool) {
 	emit(k, true) // повторне натискання = автоповтор
 }
 
+// mouseButtons — кнопки миші: біт у масці RFB, код для GetAsyncKeyState, прапорці SendInput.
+var mouseButtons = [...]struct {
+	bit      byte
+	vk       uintptr
+	name     string
+	down, up uint32
+}{
+	{1, 0x01, "ліву", mouseLeftDown, mouseLeftUp},
+	{2, 0x04, "середню", mouseMiddleDown, mouseMiddleUp},
+	{4, 0x02, "праву", mouseRightDown, mouseRightUp},
+}
+
+// activeInputs — клієнти, які щось уводили й ще не відключилися. Належить потокові вводу.
+var activeInputs = map[*inputState]struct{}{}
+
+// stuckButtons — кнопки миші, які Windows вважає затиснутими (down), хоча клієнт їх не
+// тисне (mask) і жоден клієнт не тримає (held). Таке лишається, коли подію «відпущено»
+// хтось загубив: сервер зупинили посеред натискання, інша програма «натиснула» кнопку
+// й не відпустила. Поки кнопка «затиснута», кліки рештою кнопок до вікон не доходять.
+func stuckButtons(mask, held byte, down func(vk uintptr) bool) (bits byte) {
+	for _, b := range mouseButtons {
+		if (mask|held)&b.bit == 0 && down(b.vk) {
+			bits |= b.bit
+		}
+	}
+	return bits
+}
+
+var unstuckLogged time.Time
+
+// unstick відпускає «залиплі» кнопки миші перед подією від клієнта.
+func (st *inputState) unstick(mask byte) {
+	var held byte
+	for other := range activeInputs {
+		held |= other.buttons
+	}
+	bits := stuckButtons(mask, held, asyncDown)
+	if bits == 0 {
+		return
+	}
+	var fl uint32
+	var names []string
+	for _, b := range mouseButtons {
+		if bits&b.bit != 0 {
+			fl |= b.up
+			names = append(names, b.name)
+		}
+	}
+	if sendMouse(&mouseInput{flags: fl}) && time.Since(unstuckLogged) > 10*time.Second {
+		unstuckLogged = time.Now()
+		logf("ввід: Windows вважав %s кнопку миші затиснутою, хоча жоден клієнт її не тримав, — відпустив", strings.Join(names, " і "))
+	}
+}
+
 // pointer: x, y — у координатах кадру клієнта (fbW x fbH), який може бути
 // зменшеною копією екрана; абсолютні координати Windows від масштабу не залежать.
 func (st *inputState) pointer(x, y int, mask byte, fbW, fbH int) {
+	activeInputs[st] = struct{}{}
+	st.unstick(mask)
 	in := mouseInput{flags: mouseMove | mouseAbsolute | mouseVirtualDesk}
 	ax, ay, aw, ah := captureArea()
 	vx, vy, vw, vh := virtualScreen()
@@ -273,20 +332,22 @@ func (st *inputState) pointer(x, y int, mask byte, fbW, fbH int) {
 		in.dy = int32((py*65535 + (vh-1)/2) / (vh - 1))
 	}
 	ch := mask ^ st.buttons
-	st.buttons = mask
-	btn := func(bit byte, dn, up uint32) {
-		if ch&bit != 0 {
-			if mask&bit != 0 {
-				in.flags |= dn
+	for _, b := range mouseButtons {
+		if ch&b.bit != 0 {
+			if mask&b.bit != 0 {
+				in.flags |= b.down
 			} else {
-				in.flags |= up
+				in.flags |= b.up
 			}
 		}
 	}
-	btn(1, mouseLeftDown, mouseLeftUp)
-	btn(2, mouseMiddleDown, mouseMiddleUp)
-	btn(4, mouseRightDown, mouseRightUp)
-	sendMouse(&in)
+	if sendMouse(&in) {
+		st.buttons = mask
+	} else {
+		// Windows події не прийняв: кнопки лишаються як були, тож наступна подія
+		// від клієнта спробує натиснути чи відпустити їх ще раз
+		st.buttons = st.buttons&7 | mask&^7
+	}
 
 	wheel := func(bit byte, flag uint32, delta int32) {
 		if ch&bit != 0 && mask&bit != 0 {
@@ -301,6 +362,7 @@ func (st *inputState) pointer(x, y int, mask byte, fbW, fbH int) {
 
 // releaseAll відпускає все, що клієнт лишив натиснутим.
 func (st *inputState) releaseAll() {
+	delete(activeInputs, st)
 	for sym, k := range st.keys {
 		emit(k, false)
 		delete(st.keys, sym)

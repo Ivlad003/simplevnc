@@ -135,6 +135,7 @@ type Screen struct {
 	wake      chan struct{}
 	stale     atomic.Bool  // є клієнт, що ще не бачив свіжого захоплення
 	lastInput atomic.Int64 // UnixNano останньої події вводу
+	lastMove  atomic.Int64 // UnixNano останнього руху миші від клієнта
 }
 
 func newScreen() *Screen {
@@ -284,38 +285,59 @@ func (c *gdiCap) valid() bool                     { return true }
 func (c *dxgiCap) valid() bool                    { return c.ready }
 func (c *dxgiCap) fast() bool                     { return true }
 
-// openCapturer пробує DXGI, а якщо він недоступний — GDI.
-func openCapturer() capturer {
+// openCapturer пробує DXGI, а якщо він недоступний — GDI. Коли DXGI навряд чи віддасть
+// зображення (нещодавно мовчав або монітор не під'єднано), починаємо з GDI, щоб клієнт
+// не чекав; probe=true просить цикл захоплення одразу перевірити DXGI поруч із ним.
+func openCapturer() (c capturer, probe bool) {
 	if !noDXGI {
-		if d := newDxgiCap(); d != nil {
-			return d
+		if probe = dxgiNoImage || !monitorActive(displayDevice()); !probe {
+			if d := newDxgiCap(); d != nil {
+				return d, false
+			}
 		}
 	}
 	if g := newGdiCap(); g != nil {
-		return g
+		return g, probe
 	}
-	return nil
+	return nil, false
 }
 
 // run — цикл захоплення; працює лише коли хтось чекає на оновлення.
 func (s *Screen) run() {
 	runtime.LockOSThread()
 	var cap capturer
+	// cand — нове підключення до DXGI, яке перевіряємо, не зупиняючи трансляції: кадри
+	// й далі дає cap, а cand стає на його місце, щойно віддасть перше зображення.
+	var cand *dxgiCap
 	var curTrack cursorTrack
 	var desk deskFollower
 	var kind string
 	var retryDX time.Time
 	retryEvery := 10 * time.Second
 	var geomAt time.Time // коли востаннє змінилася геометрія чи режим екрана
+	var probed time.Time // коли востаннє перевіряли, чи DXGI не «замовк»
 	idleSince := time.Now()
 	var statFrames int
 	var statGrab, statDiff time.Duration
 	statAt := time.Now()
 	drop := func() {
+		if cand != nil {
+			cand.close()
+			cand = nil
+		}
 		if cap != nil {
 			cap.close()
 			cap = nil
 		}
+	}
+	// retryLater відкладає наступну спробу DXGI: що довше він недоступний, то рідше пробуємо.
+	retryLater := func(now time.Time) {
+		if now.Sub(geomAt) < 5*time.Second {
+			retryEvery = time.Second // режим щойно змінився: DXGI ще оговтується, пробуємо невдовзі
+		} else if retryEvery < 5*time.Minute {
+			retryEvery *= 2
+		}
+		retryDX = now.Add(retryEvery)
 	}
 	for {
 		if !s.anyWaiting() {
@@ -342,30 +364,80 @@ func (s *Screen) run() {
 				geomAt = start
 			}
 		}
-		if cap != nil && !cap.fast() && !noDXGI && start.After(retryDX) {
-			drop() // періодично пробуємо повернутися з GDI на DXGI
-		}
 		if cap == nil {
-			if cap = openCapturer(); cap == nil {
+			var probe bool
+			if cap, probe = openCapturer(); cap == nil {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 			k := "GDI"
-			if cap.fast() {
+			switch {
+			case cap.fast():
 				k, retryEvery = "DXGI", 10*time.Second
-			} else if start.Sub(geomAt) < 5*time.Second {
-				retryEvery = time.Second // режим щойно змінився: DXGI ще оговтується, пробуємо невдовзі
-			} else if retryEvery < 5*time.Minute {
-				retryEvery *= 2 // DXGI недоступний — пробуємо дедалі рідше
+			case probe:
+				retryDX = start // перевіримо DXGI одразу, поруч із GDI
+			default:
+				retryLater(start)
 			}
-			retryDX = start.Add(retryEvery)
 			if k != kind {
 				kind = k
 				logf("захоплення екрана: %s", kind)
 			}
 		}
 
-		got, ok := cap.grab(100 * time.Millisecond)
+		// Коли пробувати нове підключення до DXGI:
+		//  - працюємо через GDI — час від часу, щоб повернутися на швидкий DXGI;
+		//  - працюємо через DXGI, але після руху миші від клієнта він не віддав нічого.
+		//    Справний DXGI озивається на кожен рух миші й кожну зміну на екрані; якщо
+		//    монітор вимкнули чи від'єднали, Windows перестає виводити кадри й DXGI
+		//    мовчить, хоча робочий стіл змінюється. Нове підключення покаже, як є
+		//    насправді: справний DXGI віддає йому зображення одразу.
+		if cand == nil && !noDXGI {
+			if d, isDX := cap.(*dxgiCap); !isDX {
+				if !start.Before(retryDX) {
+					if cand = newDxgiCap(); cand == nil {
+						retryLater(start)
+					}
+				}
+			} else if in := time.Unix(0, s.lastMove.Load()); d.ready && in.After(d.alive) &&
+				start.Sub(in) > 400*time.Millisecond && start.Sub(probed) > 5*time.Second {
+				probed = start
+				cand = newDxgiCap()
+			}
+		}
+		switched := false
+		if cand != nil {
+			if _, ok := cand.grab(0); !ok {
+				cand.close()
+				cand = nil
+				if cap.fast() { // DXGI справді мовчить — далі працюємо через GDI
+					cap.close()
+					cap = nil
+					if g := newGdiCap(); g != nil {
+						cap = g
+					} else {
+						time.Sleep(500 * time.Millisecond)
+						continue
+					}
+					kind = "GDI"
+					logf("захоплення екрана: %s", kind)
+				}
+				retryLater(start)
+			} else if cand.valid() {
+				cap.close()
+				cap, cand, switched = cand, nil, true
+				retryEvery = 10 * time.Second
+				if kind != "DXGI" {
+					kind = "DXGI"
+					logf("захоплення екрана: %s", kind)
+				}
+			}
+		}
+
+		got, ok := true, true // switched: cand щойно зібрав свіжий кадр
+		if !switched {
+			got, ok = cap.grab(100 * time.Millisecond)
+		}
 		tGrab := time.Since(start)
 		if !ok {
 			// робочий стіл недоступний (UAC, екран блокування, зміна режиму)

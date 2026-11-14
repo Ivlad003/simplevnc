@@ -99,10 +99,16 @@ type dxgiCap struct {
 	ready   bool
 	drawn   bool // чи курсор намальовано в останньому зібраному кадрі
 	created time.Time
+	alive   time.Time // коли DXGI востаннє щось віддав: зображення або рух миші
 }
 
 // dxgiBadUntil — до цього часу DXGI не пробуємо (не віддав зображення).
 var dxgiBadUntil time.Time
+
+// dxgiNoImage — DXGI під'єднався, але зображення не віддав. Так буває, коли монітор
+// вимкнено чи від'єднано (ПК без монітора): Windows малює робочий стіл, але на екран
+// його не виводить, і DXGI нема чого віддавати. GDI при цьому працює.
+var dxgiNoImage bool
 
 func newDxgiCap() *dxgiCap {
 	if pD3D11CreateDevice.Find() != nil || pCreateDXGIFactory.Find() != nil ||
@@ -113,7 +119,7 @@ func newDxgiCap() *dxgiCap {
 	if g == nil {
 		return nil
 	}
-	c := &dxgiCap{gdiCap: g, created: time.Now()}
+	c := &dxgiCap{gdiCap: g, created: time.Now(), alive: time.Now()}
 	if !c.init() || len(c.outs) == 0 {
 		if verbose {
 			logf("DXGI: не вдалося почати захоплення (виходів: %d)", len(c.outs))
@@ -244,6 +250,7 @@ func (c *dxgiCap) grab(wait time.Duration) (changed, ok bool) {
 		if failed(hr) {
 			return false, false // доступ втрачено (зміна режиму, UAC) — перестворюємо
 		}
+		c.alive = time.Now()
 		// Зображення є лише коли був реальний показ кадру; перша подія може
 		// бути самим рухом миші — тоді текстура ще порожня.
 		good := true
@@ -262,10 +269,11 @@ func (c *dxgiCap) grab(wait time.Duration) (changed, ok bool) {
 		if !c.outs[i].have { // ще не всі монітори віддали перше зображення
 			if time.Since(c.created) > 1500*time.Millisecond {
 				dxgiBadUntil = time.Now().Add(time.Minute)
-				if verbose {
-					logf("DXGI: за 1,5 с не віддав зображення — хвилину працюю через GDI")
+				if !dxgiNoImage {
+					dxgiNoImage = true
+					logf("DXGI не віддає зображення (так буває, коли монітор вимкнено або від'єднано) — працюю через GDI")
 				}
-				return false, false // переходимо на GDI
+				return false, false // переходимо на GDI або лишаємося на ньому
 			}
 			time.Sleep(5 * time.Millisecond)
 			return false, true
@@ -291,6 +299,7 @@ func (c *dxgiCap) grab(wait time.Duration) (changed, ok bool) {
 		c.drawCursor()
 	}
 	c.ready, c.drawn = true, inFrame
+	dxgiNoImage = false
 	return true, true
 }
 

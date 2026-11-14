@@ -100,6 +100,11 @@ func TestListedModesAreAccepted(t *testing.T) {
 		}
 	}
 	if !current {
+		if !monitorActive(dev) {
+			// Коли монітор вимкнено чи від'єднано, Windows лишає робочому столу його
+			// розмір, але пропонує тільки загальні режими — поточного серед них немає.
+			t.Skipf("монітор не під'єднано: серед %d загальних режимів немає поточного %dx%d", len(modes), cw, ch)
+		}
 		t.Errorf("поточного режиму %dx%d немає у списку з %d режимів", cw, ch, len(modes))
 	}
 	if findMode(modeID(cw, ch)) == nil || findMode("123x45") != nil {

@@ -50,10 +50,12 @@ type Client struct {
 	encPref   int32 // кодування, яке клієнт назвав першим серед підтримуваних
 	canSize   bool
 	addr      string
-	v         *view  // кадр, який отримує клієнт (захищено scr.mu)
-	scaleReq  int    // масштаб, який клієнт просив сам; 0 — типовий
-	agent     bool   // сеанс агента (увійшов із паролем для агентів)
-	noInput   bool   // ввід від цього клієнта ігнорується
+	v         *view // кадр, який отримує клієнт (захищено scr.mu)
+	scaleReq  int   // масштаб, який клієнт просив сам; 0 — типовий
+	agent     bool  // сеанс агента (увійшов із паролем для агентів)
+	noInput   bool  // ввід від цього клієнта ігнорується
+	ptrX      int   // останнє положення миші від клієнта (лише потік читання)
+	ptrY      int
 	extClip   bool   // клієнт уміє розширений буфер обміну в UTF-8 (захищено mu)
 	apple     bool   // вбудований клієнт macOS (захищено mu)
 	canCursor bool   // клієнт сам малює курсор (захищено mu)
@@ -406,6 +408,11 @@ func (c *Client) reader() error {
 			c.scr.mu.RLock()
 			fw, fh := c.v.w, c.v.h // координати клієнта — у його власному кадрі
 			c.scr.mu.RUnlock()
+			if !c.noInput && (px != c.ptrX || py != c.ptrY) {
+				// час беремо до самого руху: відгук DXGI на нього має бути пізнішим
+				c.ptrX, c.ptrY = px, py
+				c.scr.lastMove.Store(time.Now().UnixNano())
+			}
 			c.input(func() { c.in.pointer(px, py, mask, fw, fh) })
 			c.touch()
 		case 6: // ClientCutText

@@ -28,6 +28,7 @@ var (
 	pGetForegroundWindow           = user32.NewProc("GetForegroundWindow")
 	pGetWindowThreadProcessId      = user32.NewProc("GetWindowThreadProcessId")
 	pGetKeyState                   = user32.NewProc("GetKeyState")
+	pGetAsyncKeyState              = user32.NewProc("GetAsyncKeyState")
 	pOpenClipboard                 = user32.NewProc("OpenClipboard")
 	pCloseClipboard                = user32.NewProc("CloseClipboard")
 	pEmptyClipboard                = user32.NewProc("EmptyClipboard")
@@ -165,12 +166,36 @@ func setDPIAware() {
 	pSetProcessDPIAware.Call()
 }
 
-func sendMouse(in *mouseInput) {
-	in.typ = inputMouse
-	pSendInput.Call(1, uintptr(unsafe.Pointer(in)), unsafe.Sizeof(*in))
+// inputFail — події вводу, яких Windows не прийняв (читає й обнуляє потік вводу).
+var inputFail struct {
+	n   int
+	err syscall.Errno
 }
 
-func sendKey(in *keybdInput) {
+// sendMouse і sendKey повертають false, якщо Windows події не прийняв.
+func sendMouse(in *mouseInput) bool {
+	in.typ = inputMouse
+	r, _, e := pSendInput.Call(1, uintptr(unsafe.Pointer(in)), unsafe.Sizeof(*in))
+	return sent(r, e)
+}
+
+func sendKey(in *keybdInput) bool {
 	in.typ = inputKeyboard
-	pSendInput.Call(1, uintptr(unsafe.Pointer(in)), unsafe.Sizeof(*in))
+	r, _, e := pSendInput.Call(1, uintptr(unsafe.Pointer(in)), unsafe.Sizeof(*in))
+	return sent(r, e)
+}
+
+func sent(r uintptr, e error) bool {
+	if r != 0 {
+		return true
+	}
+	inputFail.n++
+	inputFail.err, _ = e.(syscall.Errno)
+	return false
+}
+
+// asyncDown — чи Windows вважає клавішу або кнопку миші натиснутою просто зараз.
+func asyncDown(vk uintptr) bool {
+	r, _, _ := pGetAsyncKeyState.Call(vk)
+	return r&0x8000 != 0
 }

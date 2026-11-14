@@ -195,6 +195,7 @@ func runServer(o options) {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM) // Ctrl+C або закрили вікно
 	go func() {
 		<-stop
+		releaseAllInput()
 		srv.disp.shutdown() // повертаємо екрану звичайну роздільність
 		os.Exit(0)
 	}()
